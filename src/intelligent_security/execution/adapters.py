@@ -21,17 +21,17 @@ class ContainerCliAdapter:
     ) -> AdapterExecutionResult:
         if runtime.image_reference is None:
             raise RuntimeError("Container execution requires an approved image reference.")
-        target = self._authorized_target(audit, runtime)
         execution = package.execution
         if execution is None:
             raise RuntimeError("Plugin package has no approved execution specification.")
+        target = self._authorized_target(audit, runtime, execution.target_input)
         command = [
             "docker", "run", "--rm", "--pull", "never", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "512m",
         ]
         command.extend(self._mount_arguments(package.root, execution.mounts))
         command.append(runtime.image_reference)
-        command.extend(self._render_arguments(execution.arguments, target))
+        command.extend(self._render_arguments(execution.arguments, target, execution.target_input))
         try:
             completed = self.command_runner(
                 command, check=False, capture_output=True, text=True, timeout=runtime.max_runtime_seconds
@@ -75,12 +75,13 @@ class ContainerCliAdapter:
         return arguments
 
     @staticmethod
-    def _render_arguments(arguments: list, target: str) -> list:
+    def _render_arguments(arguments: list, target: str, target_input: str = "url") -> list:
+        placeholder = "{{target.%s}}" % target_input
         rendered = []
         for argument in arguments:
-            if "{{" in argument and argument != "{{target.url}}":
+            if "{{" in argument and argument != placeholder:
                 raise RuntimeError("Plugin execution uses an unsupported argument placeholder.")
-            rendered.append(target if argument == "{{target.url}}" else argument)
+            rendered.append(target if argument == placeholder else argument)
         return rendered
 
     @staticmethod
@@ -97,7 +98,7 @@ class ContainerCliAdapter:
         return count
 
     @staticmethod
-    def _authorized_target(audit: Audit, runtime: PluginRuntimeProfile) -> str:
+    def _authorized_target(audit: Audit, runtime: PluginRuntimeProfile, target_input: str = "url") -> str:
         if audit.target_profile is None or audit.scope_policy is None:
             raise RuntimeError("Validated target profile and scope policy are required.")
         target = audit.target_profile.canonical_identifier
@@ -106,4 +107,4 @@ class ContainerCliAdapter:
         allowed_hosts = {host.lower().rstrip(".") for host in runtime.allowed_target_hosts}
         if parsed.scheme != "https" or hostname not in audit.scope_policy.network_allowlist or hostname not in allowed_hosts:
             raise RuntimeError("Container target is not an authorized HTTPS runtime target.")
-        return target
+        return target if target_input == "url" else hostname

@@ -1,5 +1,6 @@
 {
   "adapter": "container_cli",
+  "target_input": "url",
   "arguments": [
     "-u", "{{target.url}}",
     "-t", "/app/templates/portfolio_safe.yaml",

@@ -109,6 +109,29 @@ class ExecutionService:
             execution.evidence_record_id = evidence.evidence_id
         return execution
 
+    def executable_plugin_ids(self, audit: Audit, registry: CapabilityRegistry) -> set[str]:
+        """Return plugins that can be selected now without exposing runtime details.
+
+        This is used by capability discovery before planner context is built. Plugin
+        packages remain declarative and no plugin-specific code is required here.
+        """
+        try:
+            profiles = self.runtime_profiles.load()
+        except RuntimeProfileError as error:
+            raise ExecutionError("runtime_configuration_error", str(error))
+        eligible = set()
+        for package in registry.active_snapshot().packages:
+            runtime = profiles.get(package.manifest.plugin_id)
+            if runtime is None or not runtime.enabled:
+                continue
+            if runtime.adapter != package.manifest.adapter or package.execution is None:
+                continue
+            if package.execution.adapter != runtime.adapter or runtime.adapter.value not in self.adapters:
+                continue
+            if self._runtime_allows_target(runtime, audit):
+                eligible.add(package.manifest.plugin_id)
+        return eligible
+
     @staticmethod
     def _resolve(
         audit: Audit,

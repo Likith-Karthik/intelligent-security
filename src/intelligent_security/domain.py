@@ -144,6 +144,7 @@ class PluginExecutionSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     adapter: PluginAdapter
+    target_input: str = Field(default="url", pattern=r"^(url|hostname)$")
     arguments: List[str] = Field(..., min_length=1, max_length=100)
     mounts: List[PluginPackageMount] = Field(default_factory=list, max_length=20)
     output_format: str = Field(default="jsonl", pattern=r"^(jsonl|text)$")

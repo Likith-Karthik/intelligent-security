@@ -303,10 +303,10 @@ Ask the model to create an explainable, typed DAG using only available capabilit
 
 ### Processing
 
-1. Capture the active registry snapshot ID and build a bounded planner request from its sanitized capabilities.
+1. Capture the active registry snapshot ID, filter capabilities against enabled adapter/runtime bindings and the validated target, then build a bounded planner request from only executable sanitized capabilities. Packages privately declare whether their adapter receives the policy-controlled target URL or hostname; these details never enter planner context.
 2. Call the model through a provider-neutral gateway.
 3. Parse structured output.
-4. Validate the JSON schema. The planner prompt requires each `depends_on` value to be an exact string step ID (never a numeric ordinal); harmless integer IDs and dependencies from compatible local models are canonicalized to strings before validation.
+4. Validate the JSON schema. The planner prompt requires each `depends_on` value to be an exact string step ID (never a numeric ordinal); harmless integer IDs and dependencies from compatible local models are canonicalized to strings before validation. Authorization operations are categories, not capability IDs: every planned capability must exactly match one discovered catalog entry. If a model response is invalid or empty, send the validation error back once for bounded regeneration; it must still pass the same validation before scheduling.
 5. Reject cycles and unknown capabilities.
 6. Save the proposed plan and rationale.
 

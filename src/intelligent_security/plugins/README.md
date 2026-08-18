@@ -88,11 +88,12 @@ An MCP-backed plugin uses `"adapter": "restricted_mcp"`; its server connection d
 
 ## Package execution specification
 
-`execution.json` is admitted with the package but is never supplied to the planner. It declares only the fixed arguments and package-local read-only mounts required by the package. The generic adapter supplies the target from the validated audit; the only current placeholder is `{{target.url}}`. A package cannot provide a shell command, executable path, credentials, network allowlist, or container image.
+`execution.json` is admitted with the package but is never supplied to the planner. It declares only fixed arguments, package-local read-only mounts, and the required validated target form. Set `target_input` to `url` for `{{target.url}}`, or `hostname` for `{{target.hostname}}`; the generic adapter supplies only that declared value. A package cannot provide a shell command, executable path, credentials, network allowlist, or container image.
 
 ```json
 {
   "adapter": "container_cli",
+  "target_input": "url",
   "arguments": ["-u", "{{target.url}}", "-t", "/app/templates/safe.yaml"],
   "mounts": [{"source": "templates", "target": "/app/templates", "read_only": true}],
   "output_format": "jsonl"
@@ -147,7 +148,9 @@ The manifest advertises a plugin; a local runtime profile permits a particular a
 }
 ```
 
-`runtime_reference` is an opaque reference to deployment-managed adapter configuration. It is not a command, Git URL, image name, secret, or MCP prompt. `allowed_target_hosts` is mandatory in practice for network-capable plugins: the runtime is not selected unless the validated audit target exactly matches this list. A runtime profile must also match both the manifest `plugin_id` and `adapter`; otherwise Flow 8 fails closed with `capability_unavailable` and invokes nothing.
+`runtime_reference` is an opaque reference to deployment-managed adapter configuration. It is not a command, Git URL, image name, secret, or MCP prompt. `allowed_target_hosts` is mandatory in practice for network-capable plugins: the runtime is not selected unless the validated audit target hostname exactly matches this list. A runtime profile must also match both the manifest `plugin_id` and `adapter`; otherwise it is excluded during capability discovery and the planner never sees it.
+
+Each executable package declares its required policy-controlled target form in `execution.json`: `"target_input": "url"` (the full validated HTTPS URL) or `"target_input": "hostname"` (the validated hostname). Its arguments may use only the matching placeholder, `{{target.url}}` or `{{target.hostname}}`. This is private adapter configuration: the planner receives neither the placeholder nor runtime allowlists, only capabilities that are executable for the audit target.
 
 ## Disable or remove a plugin
 

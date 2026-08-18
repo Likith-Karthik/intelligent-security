@@ -404,8 +404,11 @@ def create_app(
                 detail="Audit capabilities cannot be discovered before target profiling",
             )
         try:
-            discovery = app.state.capability_registry.discover(audit)
-        except RegistryError as error:
+            eligible_plugin_ids = app.state.execution_service.executable_plugin_ids(
+                audit, app.state.capability_registry
+            )
+            discovery = app.state.capability_registry.discover(audit, eligible_plugin_ids)
+        except (RegistryError, ExecutionError) as error:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Capability registry error: {}".format(error),

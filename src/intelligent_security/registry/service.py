@@ -2,7 +2,7 @@ import json
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from intelligent_security.domain import (
     Audit,
@@ -133,7 +133,7 @@ class CapabilityRegistry:
             return self.refresh()
         return self._snapshot
 
-    def discover(self, audit: Audit) -> CapabilityDiscovery:
+    def discover(self, audit: Audit, eligible_plugin_ids: Optional[Set[str]] = None) -> CapabilityDiscovery:
         if audit.target_profile is None or audit.scope_policy is None:
             raise RegistryError("Target profile and scope policy are required for capability discovery.")
 
@@ -146,6 +146,8 @@ class CapabilityRegistry:
         for package in snapshot.packages:
             manifest = package.manifest
             if not manifest.enabled or manifest.health != PluginHealth.DECLARED_HEALTHY:
+                continue
+            if eligible_plugin_ids is not None and manifest.plugin_id not in eligible_plugin_ids:
                 continue
             for capability in manifest.capabilities:
                 if audit.target_profile.target_type not in capability.target_types:
@@ -189,7 +191,7 @@ class CapabilityRegistry:
         gaps = [
             CapabilityGap(
                 operation=operation,
-                reason="No enabled, declared-healthy capability supports this authorized operation for the target.",
+                reason="No enabled, executable capability supports this authorized operation for the target.",
             )
             for operation in sorted(
                 set(audit.scope_policy.allowed_operations).difference(discovered_operations),

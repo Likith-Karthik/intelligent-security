@@ -1,6 +1,7 @@
 import json
 import subprocess
 
+import pytest
 from fastapi.testclient import TestClient
 
 from intelligent_security.app import create_app
@@ -14,6 +15,24 @@ from intelligent_security.findings.correlator import AIFindingCorrelator
 from intelligent_security.reporting.generator import ReportGenerator
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
 from intelligent_security.planning.service import AuditPlanner
+
+
+@pytest.fixture(autouse=True)
+def configured_default_runtime(tmp_path, monkeypatch) -> None:
+    """Keep default app construction hermetic while Flow 4 checks runtime eligibility."""
+    config_directory = tmp_path / "config"
+    config_directory.mkdir()
+    (config_directory / "plugin_runtimes.json").write_text(
+        json.dumps(
+            {"plugins": [{
+                "plugin_id": "nuclei", "adapter": "container_cli",
+                "runtime_reference": "container-config://test-nuclei",
+                "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+            }]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
 
 
 def valid_request() -> dict:
@@ -305,7 +324,7 @@ def test_capability_discovery_reports_gap_when_no_plugin_is_available(tmp_path) 
     assert discovery["gaps"] == [
         {
             "operation": "web_scan",
-            "reason": "No enabled, declared-healthy capability supports this authorized operation for the target.",
+            "reason": "No enabled, executable capability supports this authorized operation for the target.",
         }
     ]
 
@@ -344,8 +363,9 @@ def test_completed_scope_and_profile_stages_remain_readable_after_discovery(tmp_
 
 def test_capability_discovery_loads_a_new_manifest_without_code_changes(tmp_path) -> None:
     manifest_directory = tmp_path / "manifests"
-    manifest_directory.mkdir()
-    (manifest_directory / "custom-web-scanner.json").write_text(
+    package_directory = manifest_directory / "custom-web-scanner"
+    package_directory.mkdir(parents=True)
+    (package_directory / "manifest.json").write_text(
         json.dumps(
             {
                 "plugin_id": "custom-web-scanner",
@@ -368,8 +388,29 @@ def test_capability_discovery_loads_a_new_manifest_without_code_changes(tmp_path
         ),
         encoding="utf-8",
     )
+    (package_directory / "execution.json").write_text(
+        json.dumps(
+            {"adapter": "container_cli", "target_input": "url", "arguments": ["-u", "{{target.url}}"]}
+        ),
+        encoding="utf-8",
+    )
+    runtime_profiles_path = tmp_path / "custom-plugin-runtimes.json"
+    runtime_profiles_path.write_text(
+        json.dumps(
+            {"plugins": [{
+                "plugin_id": "custom-web-scanner", "adapter": "container_cli",
+                "runtime_reference": "container-config://test-custom-scanner",
+                "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+            }]}
+        ),
+        encoding="utf-8",
+    )
     client = TestClient(
-        create_app(str(tmp_path / "audits.db"), plugin_manifest_directory=str(manifest_directory))
+        create_app(
+            str(tmp_path / "audits.db"),
+            plugin_manifest_directory=str(manifest_directory),
+            plugin_runtime_profiles_path=str(runtime_profiles_path),
+        )
     )
     created = client.post("/audits", json=valid_request()).json()
     assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
@@ -441,6 +482,19 @@ class FakeModelGateway:
         return self.response
 
 
+class RepairingFakeModelGateway:
+    def __init__(self, responses: list[dict]) -> None:
+        self.responses = responses
+        self.calls = 0
+        self.system_prompts = []
+
+    def generate_json(self, profile, system_prompt: str, user_prompt: str) -> dict:
+        self.system_prompts.append(system_prompt)
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
 class FakeIntelligence:
     def generate(self, purpose, system_prompt, context):
         if purpose == "finding_correlation":
@@ -488,10 +542,21 @@ def prepared_plan_client(
 ) -> tuple:
     profiles_path = tmp_path / "model_profiles.json"
     write_model_profiles(profiles_path)
+    runtime_profiles_path = tmp_path / "plugin_runtimes.json"
+    runtime_profiles_path.write_text(
+        json.dumps(
+            {"plugins": [{
+                "plugin_id": "nuclei", "adapter": "container_cli",
+                "runtime_reference": "container-config://test-nuclei",
+                "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+            }]}
+        ),
+        encoding="utf-8",
+    )
     app = create_app(
         str(tmp_path / "audits.db"),
         model_profiles_path=str(profiles_path),
-        plugin_runtime_profiles_path=str(tmp_path / "no-plugin-runtimes.json"),
+        plugin_runtime_profiles_path=str(runtime_profiles_path),
     )
     app.state.audit_planner = AuditPlanner(FakeModelGateway(generated_plan))
     client = TestClient(app)
@@ -533,6 +598,18 @@ def test_plan_generation_creates_a_validated_plan_and_event(tmp_path) -> None:
     assert audit["audit_plan"]["steps"][0]["capability"] == "web.vulnerability_scan"
     events = client.get(f"/audits/{created['id']}/events").json()
     assert events[-1]["event_type"] == "plan.proposed"
+
+
+def test_plan_generation_repairs_an_empty_model_plan_once(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    gateway = RepairingFakeModelGateway([{"steps": []}, generated_web_scan_plan()])
+    client.app.state.audit_planner = AuditPlanner(gateway)
+
+    response = client.post(f"/audits/{created['id']}/plan/generate")
+
+    assert response.status_code == 200
+    assert gateway.calls == 2
+    assert "previous response was rejected" in gateway.system_prompts[1]
 
 
 def test_plan_generation_rejects_an_unknown_capability(tmp_path) -> None:
@@ -1022,6 +1099,12 @@ def test_execution_promotes_satisfied_dependent_steps(tmp_path) -> None:
 
 def test_execution_fails_closed_without_an_operator_runtime_profile(tmp_path) -> None:
     client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    empty_profiles_path = tmp_path / "no-plugin-runtimes.json"
+    client.app.state.execution_service = ExecutionService(
+        PluginRuntimeProfileRegistry(str(empty_profiles_path)),
+        {"container_cli": FakeExecutionAdapter()},
+        EvidenceCollector(ArtifactStore(str(tmp_path / "evidence"))),
+    )
     approve_generated_plan(client, created["id"])
     assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
 
@@ -1072,6 +1155,37 @@ def test_container_adapter_uses_an_admitted_package_execution_profile(tmp_path) 
     assert received["command"][received["command"].index("-retries") + 1] == "0"
     assert "-fuzz" not in received["command"]
     assert "-dast" not in received["command"]
+
+
+def test_container_adapter_supplies_hostname_when_the_package_declares_it(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    approve_generated_plan(client, created["id"])
+    audit = client.app.state.audit_repository.get(created["id"])
+    step = audit.execution_schedule.steps[0] if audit.execution_schedule else None
+    if step is None:
+        assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+        audit = client.app.state.audit_repository.get(created["id"])
+        step = audit.execution_schedule.steps[0]
+    received = {}
+
+    def runner(command, **kwargs):
+        received["command"] = command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    runtime = PluginRuntimeProfile(
+        plugin_id="nuclei", adapter="container_cli", runtime_reference="container-config://test-nuclei",
+        image_reference="projectdiscovery/nuclei@sha256:test", allowed_target_hosts=["staging.example.test"], enabled=True,
+    )
+    package = client.app.state.capability_registry.active_snapshot().package_for_plugin("nuclei")
+    assert package is not None and package.execution is not None
+    package.execution = package.execution.model_copy(
+        update={"target_input": "hostname", "arguments": ["-host", "{{target.hostname}}"]}
+    )
+
+    ContainerCliAdapter(runner).execute(runtime, audit, step, package)
+
+    assert "staging.example.test" in received["command"]
+    assert "https://staging.example.test/" not in received["command"]
 
 
 def test_flow_9_captures_raw_failed_container_execution_with_redacted_invocation(tmp_path) -> None:

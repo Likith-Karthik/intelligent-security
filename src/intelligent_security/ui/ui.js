@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 let audit = null;
+let selectedAuditId = null;
 let automationMode = localStorage.getItem("security-audit-automation") || "running";
 let inFlight = false;
 let driveTimer = null;
@@ -38,19 +39,23 @@ function render() {
   loadEvents();
 }
 
-async function loadEvents() { if (!audit) return; try { const events = await api(`/audits/${audit.id}/events`); $("#events").innerHTML = renderItems(events.slice().reverse(), event => `<div class="item"><strong>${esc(event.event_type)}</strong><div class="meta">${new Date(event.occurred_at).toLocaleString()}</div></div>`, "No events yet."); } catch (_) {} }
-async function loadAudit(id = $("#audit-id").value.trim(), queue = true) { if (!id) return toast("Enter an Audit ID.", true); try { audit = await api(`/audits/${id}`); localStorage.setItem("security-audit-id", audit.id); render(); if (queue) scheduleDrive(); } catch (error) { toast(error.message, true); } }
+async function loadEvents() { if (!audit) return; const auditId = audit.id; try { const events = await api(`/audits/${auditId}/events`); if (selectedAuditId !== auditId) return; $("#events").innerHTML = renderItems(events.slice().reverse(), event => `<div class="item"><strong>${esc(event.event_type)}</strong><div class="meta">${new Date(event.occurred_at).toLocaleString()}</div></div>`, "No events yet."); } catch (_) {} }
+async function loadAudit(id = $("#audit-id").value.trim(), queue = true) { if (!id) return toast("Enter an Audit ID.", true); selectedAuditId = id; try { const loaded = await api(`/audits/${id}`); if (selectedAuditId !== id) return; audit = loaded; localStorage.setItem("security-audit-id", audit.id); render(); if (queue) scheduleDrive(); } catch (error) { if (selectedAuditId === id) toast(error.message, true); } }
 
 async function drive() {
   if (!audit || inFlight || automationMode !== "running") return;
   const route = routes[audit.state];
   const step = audit.state === "PLAN_SCHEDULED" ? audit.execution_schedule?.steps.find(item => item.status === "READY") : null;
   if (!route && !step) return;
+  const auditId = audit.id;
   inFlight = true; render();
   try {
-    audit = await api(`/audits/${audit.id}${route ? route[1] : `/steps/${encodeURIComponent(step.plan_step_id)}/execute`}`, { method: "POST" });
+    const updated = await api(`/audits/${auditId}${route ? route[1] : `/steps/${encodeURIComponent(step.plan_step_id)}/execute`}`, { method: "POST" });
+    if (selectedAuditId !== auditId) return;
+    audit = updated;
     render();
   } catch (error) {
+    if (selectedAuditId !== auditId) return;
     setAutomation("paused", `Paused after an execution error: ${error.message}`);
     toast(error.message, true);
   } finally {
@@ -58,7 +63,7 @@ async function drive() {
   }
 }
 
-$("#create-form").addEventListener("submit", async event => { event.preventDefault(); const form = event.currentTarget, values = new FormData(form), identifier = values.get("identifier").trim(), targetType = values.get("target_type"), allowed = ["web_scan", "static_analysis", "port_discovery", "llm_red_team"]; try { const payload = { name: `${targetType} audit: ${identifier}`, objective: `Comprehensively identify security issues in the authorized ${targetType} target using all compatible non-destructive capabilities.`, target: { target_type: targetType, identifier }, scope: { authorized_assets: [scopeAsset(identifier, targetType)], excluded_assets: [], prohibited_operations: ["exploit", "destructive_action"] }, authorization: { authorization_id: "poc-local-authorization", authorized_by: "poc-operator", valid_until: "2099-01-01T00:00:00Z", allowed_operations: allowed }, credential_references: [], time_budget_seconds: 3600, cost_budget_usd: 10, approval_policy: "human_approval_for_destructive_actions" }; audit = await api("/audits", { method: "POST", body: JSON.stringify(payload) }); localStorage.setItem("security-audit-id", audit.id); setAutomation("running", "Agent queued: Validate scope."); render(); scheduleDrive(); toast(`Audit created: ${audit.id}`); } catch (error) { toast(error.message, true); } });
+$("#create-form").addEventListener("submit", async event => { event.preventDefault(); const form = event.currentTarget, values = new FormData(form), identifier = values.get("identifier").trim(), targetType = values.get("target_type"), allowed = ["web_scan", "static_analysis", "port_discovery", "llm_red_team"]; try { const payload = { name: `${targetType} audit: ${identifier}`, objective: `Comprehensively identify security issues in the authorized ${targetType} target using all compatible non-destructive capabilities.`, target: { target_type: targetType, identifier }, scope: { authorized_assets: [scopeAsset(identifier, targetType)], excluded_assets: [], prohibited_operations: ["exploit", "destructive_action"] }, authorization: { authorization_id: "poc-local-authorization", authorized_by: "poc-operator", valid_until: "2099-01-01T00:00:00Z", allowed_operations: allowed }, credential_references: [], time_budget_seconds: 3600, cost_budget_usd: 10, approval_policy: "human_approval_for_destructive_actions" }; const created = await api("/audits", { method: "POST", body: JSON.stringify(payload) }); selectedAuditId = created.id; audit = created; localStorage.setItem("security-audit-id", audit.id); setAutomation("running", "Agent queued: Validate scope."); render(); scheduleDrive(); toast(`Audit created: ${audit.id}`); } catch (error) { toast(error.message, true); } });
 $("#load-audit").addEventListener("click", () => loadAudit());
 $("#pause").addEventListener("click", () => { setAutomation("paused", "Paused. The current plugin process is allowed to finish, but no next step starts."); render(); });
 $("#exit").addEventListener("click", () => { setAutomation("exited", "Exited. The audit is preserved; Restart resumes from its last safe state."); render(); });
