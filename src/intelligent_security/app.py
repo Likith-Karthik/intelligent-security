@@ -5,7 +5,19 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, status
 
-from .domain import Audit, AuditCreateRequest, AuditEvent, AuditState, PlanApprovalRequest, PlanValidationStatus
+from .domain import (
+    Audit,
+    AuditCreateRequest,
+    AuditEvent,
+    AuditState,
+    PlanApprovalRequest,
+    PlanValidationStatus,
+    PluginExecution,
+    PluginExecutionStatus,
+    ScheduledStepStatus,
+)
+from .execution.runtime_profiles import PluginRuntimeProfileRegistry
+from .execution.service import ExecutionError, ExecutionService
 from .policy.plan import PlanPolicyError, validate_plan
 from .policy.scope import ScopeValidationError, validate_scope
 from .planning.model_gateway import ModelGatewayError, OpenAICompatibleModelGateway
@@ -22,6 +34,7 @@ def create_app(
     plugin_manifest_directory: str = None,
     model_profiles_path: str = None,
     registry_admin_token: str = None,
+    plugin_runtime_profiles_path: str = None,
 ) -> FastAPI:
     resolved_path = database_path or os.getenv("AUDIT_DATABASE_PATH", "data/audits.db")
     app = FastAPI(title="Intelligent Security Audit Orchestrator", version="0.1.0")
@@ -30,6 +43,9 @@ def create_app(
     app.state.registry_admin_token = registry_admin_token or os.getenv("PLUGIN_REGISTRY_ADMIN_TOKEN")
     app.state.model_profile_registry = ModelProfileRegistry(model_profiles_path)
     app.state.audit_planner = AuditPlanner(OpenAICompatibleModelGateway())
+    app.state.execution_service = ExecutionService(
+        PluginRuntimeProfileRegistry(plugin_runtime_profiles_path)
+    )
 
     @app.post("/audits", response_model=Audit, status_code=status.HTTP_201_CREATED)
     def create_audit(request: AuditCreateRequest) -> Audit:
@@ -334,6 +350,67 @@ def create_app(
                 "reserved_duration_seconds": execution_schedule.reserved_duration_seconds,
                 "reserved_cost_usd": execution_schedule.reserved_cost_usd,
                 "registry_snapshot_id": execution_schedule.registry_snapshot_id,
+            },
+        )
+
+    @app.post("/audits/{audit_id}/steps/{step_id}/execute", response_model=Audit)
+    def execute_scheduled_step(audit_id: UUID, step_id: str) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.state != AuditState.PLAN_SCHEDULED or audit.execution_schedule is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Audit step cannot be executed before scheduling",
+            )
+        step = next(
+            (item for item in audit.execution_schedule.steps if item.plan_step_id == step_id), None
+        )
+        if step is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled step not found")
+        try:
+            execution = app.state.execution_service.execute(
+                audit, step, app.state.capability_registry
+            )
+        except ExecutionError as error:
+            if error.code == "capability_unavailable":
+                step.status = ScheduledStepStatus.CAPABILITY_UNAVAILABLE
+            snapshot_id = app.state.capability_registry.active_snapshot().snapshot_id
+            audit.plugin_executions.append(
+                PluginExecution(
+                    plan_step_id=step.plan_step_id,
+                    capability=step.capability,
+                    contract_version=step.contract_version,
+                    registry_snapshot_id=snapshot_id,
+                    status=PluginExecutionStatus.CAPABILITY_UNAVAILABLE,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                    error_code=error.code,
+                    error_message=error.message,
+                )
+            )
+            app.state.audit_repository.save_with_event(
+                audit,
+                "step.execution_blocked",
+                {"step_id": step.plan_step_id, "code": error.code, "message": error.message},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": error.code, "message": error.message},
+            )
+
+        audit.plugin_executions.append(execution)
+        event_type = "step.completed" if execution.status == PluginExecutionStatus.SUCCEEDED else "step.failed"
+        return app.state.audit_repository.save_with_event(
+            audit,
+            event_type,
+            {
+                "step_id": step.plan_step_id,
+                "execution_id": str(execution.execution_id),
+                "plugin_id": execution.plugin_id,
+                "plugin_version": execution.plugin_version,
+                "adapter": execution.adapter.value if execution.adapter else None,
+                "status": execution.status.value,
             },
         )
 

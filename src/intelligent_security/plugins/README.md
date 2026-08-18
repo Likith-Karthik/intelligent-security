@@ -17,8 +17,9 @@ Adding a plugin that uses an existing adapter is manifest/configuration work. Ad
 2. Create a JSON manifest in `src/intelligent_security/plugins/manifests/`.
 3. Use a unique `plugin_id` and declare one or more versioned capabilities.
 4. Do not place API keys, passwords, shell commands, arbitrary executable paths, or raw MCP instructions in the manifest.
-5. Refresh the registry with an authorized operator token.
-6. Create a new audit and run capability discovery to confirm the capability is available.
+5. Add a matching operator-managed runtime profile in `config/plugin_runtimes.json` and ensure its trusted adapter implementation is registered by deployment code.
+6. Refresh the registry with an authorized operator token.
+7. Create a new audit and run capability discovery to confirm the capability is available.
 
 Example: LLM testing plugin using the LLM-testing adapter.
 
@@ -76,6 +77,25 @@ curl -X POST http://127.0.0.1:8000/admin/plugins/refresh \
 ```
 
 The refresh validates every manifest and atomically creates a new snapshot. If any manifest is invalid or two manifests use the same `plugin_id`, refresh returns `422` and the earlier snapshot stays active. A missing or invalid token is rejected. The refresh does not install software, run plugin commands, download dependencies, or accept arbitrary executable paths.
+
+## Configure the runtime
+
+The manifest advertises a plugin; a local runtime profile permits a particular already-installed implementation to be selected for execution. Start from `config/plugin_runtimes.example.json`:
+
+```json
+{
+  "plugins": [
+    {
+      "plugin_id": "nuclei",
+      "adapter": "container_cli",
+      "runtime_reference": "container-config://nuclei-approved-runtime",
+      "enabled": true
+    }
+  ]
+}
+```
+
+`runtime_reference` is an opaque reference to deployment-managed adapter configuration. It is not a command, Git URL, image name, secret, or MCP prompt. A runtime profile must match both the manifest `plugin_id` and `adapter`; otherwise Flow 8 fails closed with `capability_unavailable` and invokes nothing.
 
 ## Disable or remove a plugin
 

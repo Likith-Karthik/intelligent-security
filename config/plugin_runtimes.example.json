@@ -1,0 +1,10 @@
+{
+  "plugins": [
+    {
+      "plugin_id": "nuclei",
+      "adapter": "container_cli",
+      "runtime_reference": "container-config://nuclei-approved-runtime",
+      "enabled": false
+    }
+  ]
+}

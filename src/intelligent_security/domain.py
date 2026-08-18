@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -136,6 +136,7 @@ class CapabilityCandidate(BaseModel):
     description: str
     plugin_id: str
     plugin_version: str
+    adapter: PluginAdapter = PluginAdapter.CONTAINER_CLI
     required_operation: AuditOperation
     required_inputs: List[str]
     estimated_duration_seconds: int
@@ -237,11 +238,16 @@ class PlanApprovalRequest(BaseModel):
 class ScheduledStepStatus(str, Enum):
     PENDING = "PENDING"
     READY = "READY"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CAPABILITY_UNAVAILABLE = "CAPABILITY_UNAVAILABLE"
 
 
 class ScheduledStep(BaseModel):
     plan_step_id: str
     capability: str
+    contract_version: str = "1"
     depends_on: List[str]
     status: ScheduledStepStatus
     estimated_duration_seconds: int = Field(..., ge=1)
@@ -255,6 +261,29 @@ class ExecutionSchedule(BaseModel):
     reserved_duration_seconds: int = Field(..., ge=0)
     reserved_cost_usd: float = Field(..., ge=0)
     scheduled_at: datetime
+
+
+class PluginExecutionStatus(str, Enum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CAPABILITY_UNAVAILABLE = "CAPABILITY_UNAVAILABLE"
+
+
+class PluginExecution(BaseModel):
+    execution_id: UUID = Field(default_factory=uuid4)
+    plan_step_id: str
+    capability: str
+    contract_version: str
+    plugin_id: Optional[str] = None
+    plugin_version: Optional[str] = None
+    adapter: Optional[PluginAdapter] = None
+    registry_snapshot_id: str
+    status: PluginExecutionStatus
+    started_at: datetime
+    completed_at: datetime
+    output_summary: dict = Field(default_factory=dict)
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class AuditCreateRequest(BaseModel):
@@ -301,6 +330,7 @@ class Audit(BaseModel):
     plan_approved_by: Optional[str] = None
     execution_schedule: Optional[ExecutionSchedule] = None
     plan_scheduled_at: Optional[datetime] = None
+    plugin_executions: List[PluginExecution] = Field(default_factory=list)
 
 
 class AuditEvent(BaseModel):

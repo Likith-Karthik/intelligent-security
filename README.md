@@ -13,6 +13,7 @@ The current implementation supports two flows:
 5. Generate an audit plan: use an approved model profile to produce a structured plan, validate its shape and dependencies, and transition the audit to `PLAN_PROPOSED`.
 6. Validate and approve a plan: re-check proposed steps against persisted scope, discovered capabilities, plugin health, and budgets before transitioning to `PLAN_APPROVED` or a human approval checkpoint.
 7. Schedule approved steps: persist the approved DAG with `READY` dependency-free steps and `PENDING` dependent steps; this stage does not execute tools.
+8. Resolve and execute a plugin: late-bind a `READY` capability to an operator-configured runtime, invoke it through a trusted adapter, and record the resolved implementation and outcome.
 
 Credential values are not accepted; only opaque credential references are persisted.
 
@@ -175,3 +176,19 @@ curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/schedule
 ```
 
 Only `PLAN_APPROVED` audits can be scheduled. The response transitions to `PLAN_SCHEDULED`, persists only capability-level steps, reserves declared time/cost estimates, and marks dependency-free steps `READY`. It does not bind a plugin implementation; Flow 8 resolves a healthy compatible implementation immediately before invocation. No plugin is invoked during scheduling.
+
+### Configure and execute a plugin
+
+Runtime profiles are local, operator-managed configuration. Copy the example and configure an already-installed or already-running approved tool; do not add credentials, Git URLs, or arbitrary commands to a manifest.
+
+```bash
+cp config/plugin_runtimes.example.json config/plugin_runtimes.json
+```
+
+After a `PLAN_SCHEDULED` audit has a `READY` step and a matching adapter/runtime implementation is registered, execute it with:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/steps/{step_id}/execute
+```
+
+The resolver selects the best currently admitted implementation that matches the capability contract and has an enabled runtime profile. If none is configured, the endpoint returns `409` with `capability_unavailable`, records an auditable blocked execution, and invokes nothing. The POC does not ship a production tool adapter yet; its test adapter is used only by automated tests.

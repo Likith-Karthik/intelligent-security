@@ -279,3 +279,21 @@ curl -X POST http://127.0.0.1:8000/admin/plugins/refresh \
 ```
 
 Expected: `200 OK` with a new `snapshot_id`. New Flow 4 discoveries use that snapshot. An incorrect token returns `403`; an invalid or duplicate manifest returns `422` and the prior snapshot remains active.
+
+## Flow 8 Manual Tests
+
+### 27. Verify execution fails closed without a runtime profile
+
+Schedule a `READY` step, then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/steps/{step_id}/execute
+```
+
+Expected: `409` with `capability_unavailable`, a `step.execution_blocked` event, and no tool invocation.
+
+### 28. Verify an approved adapter execution
+
+Configure an operator-approved runtime profile and adapter implementation for the scheduled capability, then call the same endpoint.
+
+Expected: the scheduled step transitions to `SUCCEEDED` or `FAILED`; a plugin execution record includes the resolved plugin/version and adapter; the event is `step.completed` or `step.failed`. Raw logs and artifacts are intentionally deferred to Flow 9.

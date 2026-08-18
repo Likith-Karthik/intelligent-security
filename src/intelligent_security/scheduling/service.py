@@ -45,6 +45,7 @@ def schedule_plan(audit: Audit) -> ExecutionSchedule:
             ScheduledStep(
                 plan_step_id=plan_step.id,
                 capability=plan_step.capability,
+                contract_version=candidate.contract_version,
                 depends_on=plan_step.depends_on,
                 status=(ScheduledStepStatus.READY if not plan_step.depends_on else ScheduledStepStatus.PENDING),
                 estimated_duration_seconds=candidate.estimated_duration_seconds,

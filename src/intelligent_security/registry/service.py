@@ -101,6 +101,7 @@ class CapabilityRegistry:
                         description=capability.description,
                         plugin_id=manifest.plugin_id,
                         plugin_version=manifest.plugin_version,
+                        adapter=manifest.adapter,
                         required_operation=capability.required_operation,
                         required_inputs=capability.required_inputs,
                         estimated_duration_seconds=capability.estimated_duration_seconds,

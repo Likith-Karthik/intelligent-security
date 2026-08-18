@@ -3,6 +3,8 @@ import json
 from fastapi.testclient import TestClient
 
 from intelligent_security.app import create_app
+from intelligent_security.execution.runtime_profiles import PluginRuntimeProfileRegistry
+from intelligent_security.execution.service import ExecutionService
 from intelligent_security.planning.service import AuditPlanner
 
 
@@ -268,8 +270,9 @@ def test_capability_discovery_matches_web_scan_to_nuclei(tmp_path) -> None:
                 "capability": "web.vulnerability_scan",
                 "contract_version": "1",
             "description": "Run template-based vulnerability scans against an authorized web application or API.",
-            "plugin_id": "nuclei",
-            "plugin_version": "1",
+                "plugin_id": "nuclei",
+                "plugin_version": "1",
+                "adapter": "container_cli",
             "required_operation": "web_scan",
             "required_inputs": ["target_profile", "scope_policy"],
             "estimated_duration_seconds": 600,
@@ -826,3 +829,66 @@ def test_planner_receives_sanitized_snapshot_capabilities(tmp_path) -> None:
     assert discovery["registry_snapshot_id"] in gateway.user_prompt
     assert "plugin_id" not in gateway.user_prompt
     assert "plugin_version" not in gateway.user_prompt
+
+
+class FakeExecutionAdapter:
+    def execute(self, runtime, audit, step) -> dict:
+        return {"result": "safe-test-success", "runtime_reference_used": bool(runtime.runtime_reference)}
+
+
+def configure_fake_execution_runtime(app, tmp_path) -> None:
+    profiles_path = tmp_path / "plugin_runtimes.json"
+    profiles_path.write_text(
+        json.dumps(
+            {
+                "plugins": [
+                    {
+                        "plugin_id": "nuclei",
+                        "adapter": "container_cli",
+                        "runtime_reference": "container-config://test-nuclei",
+                        "enabled": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    app.state.execution_service = ExecutionService(
+        PluginRuntimeProfileRegistry(str(profiles_path)), {"container_cli": FakeExecutionAdapter()}
+    )
+
+
+def test_execution_late_binds_a_configured_plugin_and_records_result(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    configure_fake_execution_runtime(client.app, tmp_path)
+    approve_generated_plan(client, created["id"])
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/steps/scan-web-app/execute")
+
+    assert response.status_code == 200
+    audit = response.json()
+    assert audit["execution_schedule"]["steps"][0]["status"] == "SUCCEEDED"
+    execution = audit["plugin_executions"][-1]
+    assert execution["status"] == "SUCCEEDED"
+    assert execution["plugin_id"] == "nuclei"
+    assert execution["adapter"] == "container_cli"
+    assert execution["output_summary"]["result"] == "safe-test-success"
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "step.completed"
+
+
+def test_execution_fails_closed_without_an_operator_runtime_profile(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    approve_generated_plan(client, created["id"])
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/steps/scan-web-app/execute")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "capability_unavailable"
+    audit = client.get(f"/audits/{created['id']}").json()
+    assert audit["execution_schedule"]["steps"][0]["status"] == "CAPABILITY_UNAVAILABLE"
+    assert audit["plugin_executions"][-1]["status"] == "CAPABILITY_UNAVAILABLE"
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "step.execution_blocked"
