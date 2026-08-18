@@ -10,6 +10,7 @@ from intelligent_security.domain import (
     CapabilityDiscovery,
     CapabilityGap,
     PluginHealth,
+    PluginExecutionSpec,
     PluginManifest,
 )
 
@@ -18,11 +19,27 @@ class RegistryError(Exception):
     pass
 
 
+class PluginPackage:
+    """An admitted plugin package; execution details remain internal to the registry."""
+
+    def __init__(self, manifest: PluginManifest, root: Path, execution: Optional[PluginExecutionSpec]) -> None:
+        self.manifest = manifest
+        self.root = root
+        self.execution = execution
+
+
 class RegistrySnapshot:
-    def __init__(self, snapshot_id: str, manifests: List[PluginManifest], created_at: datetime) -> None:
+    def __init__(self, snapshot_id: str, packages: List[PluginPackage], created_at: datetime) -> None:
         self.snapshot_id = snapshot_id
-        self.manifests = manifests
+        self.packages = packages
         self.created_at = created_at
+
+    @property
+    def manifests(self) -> List[PluginManifest]:
+        return [package.manifest for package in self.packages]
+
+    def package_for_plugin(self, plugin_id: str) -> Optional[PluginPackage]:
+        return next((package for package in self.packages if package.manifest.plugin_id == plugin_id), None)
 
     def summary(self) -> dict:
         return {
@@ -38,33 +55,68 @@ class CapabilityRegistry:
     registry_version = "1"
 
     def __init__(self, manifest_directory: Optional[str] = None) -> None:
-        default_directory = Path(__file__).resolve().parents[1] / "plugins" / "manifests"
+        default_directory = Path(__file__).resolve().parents[1] / "plugins" / "packages"
         self.manifest_directory = Path(manifest_directory) if manifest_directory else default_directory
         self._snapshot: Optional[RegistrySnapshot] = None
 
     def load_manifests(self) -> List[PluginManifest]:
+        return [package.manifest for package in self.load_packages()]
+
+    def load_packages(self) -> List[PluginPackage]:
         if not self.manifest_directory.exists():
             return []
-        manifests = []
-        for path in sorted(self.manifest_directory.glob("*.json")):
+        manifest_paths = sorted(self.manifest_directory.rglob("manifest.json"))
+        # Flat manifests remain accepted for backward-compatible operator configuration.
+        manifest_paths.extend(
+            path for path in sorted(self.manifest_directory.glob("*.json")) if path not in manifest_paths
+        )
+        packages = []
+        for path in manifest_paths:
             try:
                 with path.open(encoding="utf-8") as manifest_file:
-                    manifests.append(PluginManifest.model_validate(json.load(manifest_file)))
+                    manifest = PluginManifest.model_validate(json.load(manifest_file))
+                execution_path = path.parent / "execution.json"
+                execution = None
+                if execution_path.exists():
+                    with execution_path.open(encoding="utf-8") as execution_file:
+                        execution = PluginExecutionSpec.model_validate(json.load(execution_file))
+                    if execution.adapter != manifest.adapter:
+                        raise RegistryError("Execution adapter must match manifest adapter.")
+                    self._validate_execution_mounts(path.parent, execution)
+                packages.append(PluginPackage(manifest, path.parent, execution))
             except (OSError, ValueError) as error:
                 raise RegistryError("Unable to load plugin manifest {}: {}".format(path.name, error))
-        return manifests
+        return packages
+
+    @staticmethod
+    def _validate_execution_mounts(package_root: Path, execution: PluginExecutionSpec) -> None:
+        root = package_root.resolve()
+        for mount in execution.mounts:
+            source = (root / mount.source).resolve()
+            if root not in source.parents and source != root:
+                raise RegistryError("Plugin execution mount escapes its package root.")
+            if not source.exists():
+                raise RegistryError("Plugin execution mount source does not exist: {}".format(mount.source))
 
     def refresh(self) -> RegistrySnapshot:
         """Atomically replace the active snapshot after complete manifest admission."""
-        manifests = self.load_manifests()
-        plugin_ids = [manifest.plugin_id for manifest in manifests]
+        packages = self.load_packages()
+        plugin_ids = [package.manifest.plugin_id for package in packages]
         if len(plugin_ids) != len(set(plugin_ids)):
             raise RegistryError("Plugin manifest admission failed: duplicate plugin_id.")
         serialized = json.dumps(
-            [manifest.model_dump(mode="json") for manifest in manifests], sort_keys=True, separators=(",", ":")
+            [
+                {
+                    "manifest": package.manifest.model_dump(mode="json"),
+                    "execution": package.execution.model_dump(mode="json") if package.execution else None,
+                }
+                for package in packages
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
         )
         snapshot_id = "registry-{}".format(hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16])
-        snapshot = RegistrySnapshot(snapshot_id, manifests, datetime.now(timezone.utc))
+        snapshot = RegistrySnapshot(snapshot_id, packages, datetime.now(timezone.utc))
         self._snapshot = snapshot
         return snapshot
 
@@ -83,7 +135,8 @@ class CapabilityRegistry:
 
         snapshot = self.active_snapshot()
         candidates = []
-        for manifest in snapshot.manifests:
+        for package in snapshot.packages:
+            manifest = package.manifest
             if not manifest.enabled or manifest.health != PluginHealth.DECLARED_HEALTHY:
                 continue
             for capability in manifest.capabilities:

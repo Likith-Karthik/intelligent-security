@@ -1,0 +1,18 @@
+id: portfolio-missing-content-security-policy
+info:
+  name: Missing Content-Security-Policy header
+  author: intelligent-security-poc
+  severity: low
+  description: Reports when an HTTPS response does not send a Content-Security-Policy header.
+  tags: misconfig,exposure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    redirects: false
+    matchers:
+      - type: word
+        part: header
+        words:
+          - "content-security-policy"
+        negative: true

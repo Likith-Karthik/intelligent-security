@@ -83,7 +83,11 @@ src/
 ├── plugins/
 │   ├── sdk.py
 │   ├── loader.py
-│   ├── manifests/
+│   ├── packages/
+│   │   └── <plugin-id>/
+│   │       ├── manifest.json
+│   │       ├── execution.json
+│   │       └── templates/
 │   ├── adapters/
 │   │   ├── native.py
 │   │   ├── container_cli.py
@@ -116,12 +120,12 @@ The directories describe ownership boundaries. They do not require separate serv
 
 Core flows depend on capability and adapter interfaces, never on concrete tool packages.
 
-- A **plugin manifest** describes a security implementation, supported capability contracts, risk, estimates, health-check metadata, and a reference to an approved adapter configuration.
+- A **plugin package** contains a planner-visible manifest plus private, admitted execution descriptors and assets. The manifest describes capability contracts, risk, estimates, and health metadata; execution descriptors never enter planner context.
 - A **capability contract** defines the stable semantic input/output boundary visible to planning and policy.
 - An **adapter** is trusted core infrastructure for one invocation mechanism: native Python, allowlisted CLI/container, REST, restricted MCP, or LLM-testing orchestration.
 - A **registry backend** supplies admitted manifests. The POC uses configured local sources plus an operator-triggered refresh, but the interface permits startup scanning, file watching, a database, remote workers, or a marketplace later.
 
-The planner has read-only access to a sanitized immutable registry snapshot. It may select advertised capabilities but cannot install software, register endpoints, edit manifests, choose arbitrary commands, or bypass adapter policy.
+The planner has read-only access to a sanitized immutable registry snapshot. It may select advertised capabilities but cannot install software, register endpoints, edit manifests, choose arbitrary commands, read execution descriptors, or bypass adapter policy.
 
 ## 4. Flow 1 — Create Audit
 

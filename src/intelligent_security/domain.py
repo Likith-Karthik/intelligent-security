@@ -129,6 +129,25 @@ class PluginManifest(BaseModel):
     capabilities: List[PluginCapability] = Field(..., min_length=1, max_length=100)
 
 
+class PluginPackageMount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(..., min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_./-]+$")
+    target: str = Field(..., min_length=2, max_length=200, pattern=r"^/[A-Za-z0-9_./-]+$")
+    read_only: bool = True
+
+
+class PluginExecutionSpec(BaseModel):
+    """Trusted, package-owned invocation descriptor; never shown to the planner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adapter: PluginAdapter
+    arguments: List[str] = Field(..., min_length=1, max_length=100)
+    mounts: List[PluginPackageMount] = Field(default_factory=list, max_length=20)
+    output_format: str = Field(default="jsonl", pattern=r"^(jsonl|text)$")
+
+
 class CapabilityCandidate(BaseModel):
     rank: int
     capability: str

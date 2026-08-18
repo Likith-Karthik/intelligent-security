@@ -17,6 +17,7 @@ from .domain import (
     ScheduledStepStatus,
 )
 from .execution.runtime_profiles import PluginRuntimeProfileRegistry
+from .execution.adapters import ContainerCliAdapter
 from .execution.service import ExecutionError, ExecutionService
 from .policy.plan import PlanPolicyError, validate_plan
 from .policy.scope import ScopeValidationError, validate_scope
@@ -44,7 +45,8 @@ def create_app(
     app.state.model_profile_registry = ModelProfileRegistry(model_profiles_path)
     app.state.audit_planner = AuditPlanner(OpenAICompatibleModelGateway())
     app.state.execution_service = ExecutionService(
-        PluginRuntimeProfileRegistry(plugin_runtime_profiles_path)
+        PluginRuntimeProfileRegistry(plugin_runtime_profiles_path),
+        {"container_cli": ContainerCliAdapter()},
     )
 
     @app.post("/audits", response_model=Audit, status_code=status.HTTP_201_CREATED)

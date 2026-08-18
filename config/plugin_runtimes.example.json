@@ -4,6 +4,9 @@
       "plugin_id": "nuclei",
       "adapter": "container_cli",
       "runtime_reference": "container-config://nuclei-approved-runtime",
+      "image_reference": "projectdiscovery/nuclei@sha256:replace-with-approved-image-digest",
+      "max_runtime_seconds": 300,
+      "allowed_target_hosts": ["authorized.example.com"],
       "enabled": false
     }
   ]

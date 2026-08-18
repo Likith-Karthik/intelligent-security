@@ -9,7 +9,7 @@ The current implementation supports two flows:
 1. Create an audit: accept a typed audit request, persist it in SQLite, set its state to `CREATED`, and emit an immutable `audit.created` event.
 2. Validate authorization and scope: compile the request into a machine-enforceable scope policy and transition the audit to `SCOPE_VALIDATED` or `SCOPE_REJECTED`.
 3. Profile the target: derive a safe, deterministic target profile from validated metadata and transition the audit to `TARGET_PROFILED`.
-4. Discover compatible capabilities: load plugin manifests, filter them against profile and scope, rank candidates, and transition the audit to `CAPABILITIES_DISCOVERED`.
+4. Discover compatible capabilities: admit plugin packages, filter their manifests against profile and scope, rank candidates, and transition the audit to `CAPABILITIES_DISCOVERED`.
 5. Generate an audit plan: use an approved model profile to produce a structured plan, validate its shape and dependencies, and transition the audit to `PLAN_PROPOSED`.
 6. Validate and approve a plan: re-check proposed steps against persisted scope, discovered capabilities, plugin health, and budgets before transitioning to `PLAN_APPROVED` or a human approval checkpoint.
 7. Schedule approved steps: persist the approved DAG with `READY` dependency-free steps and `PENDING` dependent steps; this stage does not execute tools.
@@ -81,7 +81,7 @@ Expected result: `200 OK`, audit state `TARGET_PROFILED`, a versioned `target_pr
 curl -X POST http://127.0.0.1:8000/audits/{audit_id}/capabilities/discover
 ```
 
-Expected result: `200 OK`, state `CAPABILITIES_DISCOVERED`, ranked `capability_discovery.candidates`, any `gaps`, and a `capabilities.discovered` event. The bundled manifests declare Semgrep, Nuclei, Promptfoo, and Nmap capabilities. They are declarations only: Flow 4 does not execute binaries or verify their runtime dependencies.
+Expected result: `200 OK`, state `CAPABILITIES_DISCOVERED`, ranked `capability_discovery.candidates`, any `gaps`, and a `capabilities.discovered` event. The bundled packages declare Semgrep, Nuclei, Promptfoo, and Nmap capabilities. Flow 4 does not execute binaries or verify their runtime dependencies.
 
 ### Refresh the plugin registry
 
@@ -92,7 +92,7 @@ curl -X POST http://127.0.0.1:8000/admin/plugins/refresh \
   -H "X-Plugin-Registry-Token: $PLUGIN_REGISTRY_ADMIN_TOKEN"
 ```
 
-Refresh reads only the configured manifest source, validates every manifest, and swaps in the resulting snapshot atomically. It does not install packages, execute plugin binaries, accept arbitrary executable paths, or change allowlists. If admission fails, the prior snapshot remains active. The endpoint is disabled when no token is configured.
+Refresh reads only the configured plugin-package source, validates every manifest and package-local execution specification, and swaps in the resulting snapshot atomically. It does not install packages, execute plugin binaries, accept arbitrary executable paths, or change allowlists. If admission fails, the prior snapshot remains active. The endpoint is disabled when no token is configured.
 
 ### Configure a planner model
 
@@ -191,4 +191,4 @@ After a `PLAN_SCHEDULED` audit has a `READY` step and a matching adapter/runtime
 curl -X POST http://127.0.0.1:8000/audits/{audit_id}/steps/{step_id}/execute
 ```
 
-The resolver selects the best currently admitted implementation that matches the capability contract and has an enabled runtime profile. If none is configured, the endpoint returns `409` with `capability_unavailable`, records an auditable blocked execution, and invokes nothing. The POC does not ship a production tool adapter yet; its test adapter is used only by automated tests.
+The resolver selects the best currently admitted package that matches the capability contract and has an enabled runtime profile. If none is configured, the endpoint returns `409` with `capability_unavailable`, records an auditable blocked execution, and invokes nothing. The core includes only a generic constrained container adapter: it accepts a digest-pinned image from the local runtime profile, renders policy-controlled typed inputs, and uses package-owned fixed arguments and read-only package-local mounts. Nuclei is merely the bundled example package; deleting its directory and refreshing removes it without changing core source code.

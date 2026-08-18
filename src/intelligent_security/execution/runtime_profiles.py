@@ -15,6 +15,9 @@ class PluginRuntimeProfile(BaseModel):
     plugin_id: str = Field(..., min_length=3, max_length=200)
     adapter: PluginAdapter
     runtime_reference: str = Field(..., min_length=8, max_length=1024, pattern=r"^[A-Za-z][A-Za-z0-9+.-]*://\S+$")
+    image_reference: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    max_runtime_seconds: int = Field(default=300, ge=30, le=3600)
+    allowed_target_hosts: List[str] = Field(default_factory=list, max_length=100)
     enabled: bool = True
 
 

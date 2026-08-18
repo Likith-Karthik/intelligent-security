@@ -1,10 +1,13 @@
 import json
+import subprocess
 
 from fastapi.testclient import TestClient
 
 from intelligent_security.app import create_app
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfileRegistry
 from intelligent_security.execution.service import ExecutionService
+from intelligent_security.execution.adapters import ContainerCliAdapter
+from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
 from intelligent_security.planning.service import AuditPlanner
 
 
@@ -381,6 +384,52 @@ def test_capability_discovery_loads_a_new_manifest_without_code_changes(tmp_path
     assert candidate["capability"] == "web.custom_scan"
 
 
+def test_package_removal_updates_new_discoveries_after_refresh(tmp_path) -> None:
+    package_root = tmp_path / "packages" / "removable-scanner"
+    package_root.mkdir(parents=True)
+    manifest_path = package_root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "plugin_id": "removable-scanner",
+                "plugin_version": "1",
+                "adapter": "container_cli",
+                "enabled": True,
+                "health": "declared_healthy",
+                "capabilities": [{
+                    "capability": "web.removable_scan",
+                    "description": "A removable package capability.",
+                    "target_types": ["web_application"],
+                    "required_operation": "web_scan",
+                    "required_inputs": ["target_profile", "scope_policy"],
+                    "estimated_duration_seconds": 60,
+                    "estimated_cost_usd": 0,
+                    "reliability": 0.5,
+                }],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(tmp_path / "packages"),
+        registry_admin_token="test-admin-token",
+    )
+    client = TestClient(app)
+    initial = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    )
+    assert initial.status_code == 200
+    assert app.state.capability_registry.active_snapshot().package_for_plugin("removable-scanner") is not None
+
+    manifest_path.unlink()
+    refreshed = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    )
+    assert refreshed.status_code == 200
+    assert app.state.capability_registry.active_snapshot().package_for_plugin("removable-scanner") is None
+
+
 class FakeModelGateway:
     def __init__(self, response: dict) -> None:
         self.response = response
@@ -423,7 +472,11 @@ def prepared_plan_client(
 ) -> tuple:
     profiles_path = tmp_path / "model_profiles.json"
     write_model_profiles(profiles_path)
-    app = create_app(str(tmp_path / "audits.db"), model_profiles_path=str(profiles_path))
+    app = create_app(
+        str(tmp_path / "audits.db"),
+        model_profiles_path=str(profiles_path),
+        plugin_runtime_profiles_path=str(tmp_path / "no-plugin-runtimes.json"),
+    )
     app.state.audit_planner = AuditPlanner(FakeModelGateway(generated_plan))
     client = TestClient(app)
     request = valid_request()
@@ -829,10 +882,13 @@ def test_planner_receives_sanitized_snapshot_capabilities(tmp_path) -> None:
     assert discovery["registry_snapshot_id"] in gateway.user_prompt
     assert "plugin_id" not in gateway.user_prompt
     assert "plugin_version" not in gateway.user_prompt
+    assert "arguments" not in gateway.user_prompt
+    assert "mounts" not in gateway.user_prompt
+    assert "image_reference" not in gateway.user_prompt
 
 
 class FakeExecutionAdapter:
-    def execute(self, runtime, audit, step) -> dict:
+    def execute(self, runtime, audit, step, package) -> dict:
         return {"result": "safe-test-success", "runtime_reference_used": bool(runtime.runtime_reference)}
 
 
@@ -846,6 +902,7 @@ def configure_fake_execution_runtime(app, tmp_path) -> None:
                         "plugin_id": "nuclei",
                         "adapter": "container_cli",
                         "runtime_reference": "container-config://test-nuclei",
+                        "allowed_target_hosts": ["staging.example.test"],
                         "enabled": True,
                     }
                 ]
@@ -892,3 +949,41 @@ def test_execution_fails_closed_without_an_operator_runtime_profile(tmp_path) ->
     assert audit["plugin_executions"][-1]["status"] == "CAPABILITY_UNAVAILABLE"
     events = client.get(f"/audits/{created['id']}/events").json()
     assert events[-1]["event_type"] == "step.execution_blocked"
+
+
+def test_container_adapter_uses_an_admitted_package_execution_profile(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    approve_generated_plan(client, created["id"])
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+    audit = client.app.state.audit_repository.get(created["id"])
+    step = audit.execution_schedule.steps[0]
+    received = {}
+
+    def runner(command, **kwargs):
+        received["command"] = command
+        received["kwargs"] = kwargs
+        return subprocess.CompletedProcess(command, 0, '{"template-id":"test"}\n', "")
+
+    runtime = PluginRuntimeProfile(
+        plugin_id="nuclei",
+        adapter="container_cli",
+        runtime_reference="container-config://test-nuclei",
+        image_reference="projectdiscovery/nuclei@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb",
+        allowed_target_hosts=["staging.example.test"],
+        enabled=True,
+    )
+
+    package = client.app.state.capability_registry.active_snapshot().package_for_plugin("nuclei")
+    assert package is not None
+    result = ContainerCliAdapter(runner).execute(runtime, audit, step, package)
+
+    assert result["finding_count"] == 1
+    assert "https://staging.example.test/" in received["command"]
+    assert received["command"][received["command"].index("-ni") + 1] == "-dr"
+    assert "-duc" in received["command"]
+    assert "/app/templates/portfolio_safe.yaml" in received["command"]
+    assert received["command"][received["command"].index("-rl") + 1] == "1"
+    assert received["command"][received["command"].index("-c") + 1] == "1"
+    assert received["command"][received["command"].index("-retries") + 1] == "0"
+    assert "-fuzz" not in received["command"]
+    assert "-dast" not in received["command"]

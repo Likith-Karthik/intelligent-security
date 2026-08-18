@@ -187,7 +187,7 @@ Expected:
 
 ### 17. Add a manifest without application changes
 
-Add a JSON file under `src/intelligent_security/plugins/manifests/` following the existing manifest shape, restart the service, and run discovery for a compatible target.
+Add `src/intelligent_security/plugins/packages/<plugin-id>/manifest.json` following the existing manifest shape, refresh the registry, and run discovery for a compatible target.
 
 Expected: the new enabled `declared_healthy` capability appears in the ranked candidate list without changing the planner, API, or scheduler code.
 
@@ -297,3 +297,9 @@ Expected: `409` with `capability_unavailable`, a `step.execution_blocked` event,
 Configure an operator-approved runtime profile and adapter implementation for the scheduled capability, then call the same endpoint.
 
 Expected: the scheduled step transitions to `SUCCEEDED` or `FAILED`; a plugin execution record includes the resolved plugin/version and adapter; the event is `step.completed` or `step.failed`. Raw logs and artifacts are intentionally deferred to Flow 9.
+
+### 29. Verify Nuclei's hostname-bound safe profile
+
+Configure an enabled runtime profile for the bundled Nuclei package with an image digest and a single `allowed_target_hosts` value that matches an explicitly authorized HTTPS audit target. Execute the ready step.
+
+Expected: only that exact hostname can resolve the runtime. The generic container adapter runs the package-owned one-GET Content-Security-Policy header template with no redirects, OAST, retries, or fuzzing; its execution summary records the finding count but not raw responses.

@@ -1,10 +1,10 @@
 # Plugin Author Guide
 
-Plugins extend the audit platform by advertising security capabilities. The planner chooses from the active capability catalog; it does not know or depend on a tool's command line, MCP prompt, endpoint configuration, or credentials.
+Plugins extend the audit platform by advertising security capabilities. The planner chooses from the active capability catalog; it does not know or depend on a tool's command line, MCP prompt, endpoint configuration, credentials, container image, or package files.
 
 ## Core concepts
 
-- **Plugin**: one security implementation, such as Semgrep, Nuclei, Promptfoo, Garak, or an approved MCP security server.
+- **Plugin package**: one removable directory under `plugins/packages/<plugin-id>/`. It contains a public `manifest.json`, and may contain a trusted `execution.json` plus templates or normalizers.
 - **Capability**: a stable action the platform can plan, such as `source.static_analysis`, `web.vulnerability_scan`, or `llm.prompt_injection_test`.
 - **Adapter**: trusted core support for invoking a plugin. Supported manifest values are `native`, `container_cli`, `rest`, `restricted_mcp`, and `llm_testing`.
 - **Registry snapshot**: the validated, immutable list of active plugin manifests. New discoveries and plans use the current snapshot after an operator refresh.
@@ -14,10 +14,10 @@ Adding a plugin that uses an existing adapter is manifest/configuration work. Ad
 ## Add a plugin
 
 1. Confirm the tool is authorized for use and can be invoked through an existing adapter.
-2. Create a JSON manifest in `src/intelligent_security/plugins/manifests/`.
+2. Create `src/intelligent_security/plugins/packages/<plugin-id>/manifest.json`.
 3. Use a unique `plugin_id` and declare one or more versioned capabilities.
 4. Do not place API keys, passwords, shell commands, arbitrary executable paths, or raw MCP instructions in the manifest.
-5. Add a matching operator-managed runtime profile in `config/plugin_runtimes.json` and ensure its trusted adapter implementation is registered by deployment code.
+5. For an executable package, add a package-owned `execution.json` for an existing adapter and a matching operator-managed runtime profile in `config/plugin_runtimes.json`.
 6. Refresh the registry with an authorized operator token.
 7. Create a new audit and run capability discovery to confirm the capability is available.
 
@@ -50,6 +50,21 @@ Example: LLM testing plugin using the LLM-testing adapter.
 ```
 
 An MCP-backed plugin uses `"adapter": "restricted_mcp"`; its server connection details must be held in operator-managed adapter configuration, not in the manifest.
+
+## Package execution specification
+
+`execution.json` is admitted with the package but is never supplied to the planner. It declares only the fixed arguments and package-local read-only mounts required by the package. The generic adapter supplies the target from the validated audit; the only current placeholder is `{{target.url}}`. A package cannot provide a shell command, executable path, credentials, network allowlist, or container image.
+
+```json
+{
+  "adapter": "container_cli",
+  "arguments": ["-u", "{{target.url}}", "-t", "/app/templates/safe.yaml"],
+  "mounts": [{"source": "templates", "target": "/app/templates", "read_only": true}],
+  "output_format": "jsonl"
+}
+```
+
+The runtime profile maps the package ID to the already-approved image or service runtime. This keeps deployment-specific values outside Git while allowing a package to be added or removed without modifying core planning, policy, scheduling, or execution code.
 
 ## Manifest reference
 
@@ -89,19 +104,21 @@ The manifest advertises a plugin; a local runtime profile permits a particular a
       "plugin_id": "nuclei",
       "adapter": "container_cli",
       "runtime_reference": "container-config://nuclei-approved-runtime",
+      "image_reference": "projectdiscovery/nuclei@sha256:approved-image-digest",
+      "allowed_target_hosts": ["authorized.example.com"],
       "enabled": true
     }
   ]
 }
 ```
 
-`runtime_reference` is an opaque reference to deployment-managed adapter configuration. It is not a command, Git URL, image name, secret, or MCP prompt. A runtime profile must match both the manifest `plugin_id` and `adapter`; otherwise Flow 8 fails closed with `capability_unavailable` and invokes nothing.
+`runtime_reference` is an opaque reference to deployment-managed adapter configuration. It is not a command, Git URL, image name, secret, or MCP prompt. `allowed_target_hosts` is mandatory in practice for network-capable plugins: the runtime is not selected unless the validated audit target exactly matches this list. A runtime profile must also match both the manifest `plugin_id` and `adapter`; otherwise Flow 8 fails closed with `capability_unavailable` and invokes nothing.
 
 ## Disable or remove a plugin
 
 To temporarily remove a plugin from new discoveries, set its `enabled` field to `false` and refresh the registry.
 
-To remove it completely, delete its manifest from the approved manifest source and refresh the registry. Remove the tool's external runtime/configuration through the normal operator deployment process; this application never performs uninstall actions.
+To remove it completely, delete its package directory from the approved plugin source and refresh the registry. Remove the tool's external runtime/configuration through the normal operator deployment process; this application never performs uninstall actions.
 
 Existing audit plans and schedules retain capability requirements, not plugin IDs. During future execution, the resolver may select another healthy plugin that implements the same capability contract. If none is available, execution must return a capability gap for replanning rather than invoke a removed tool.
 

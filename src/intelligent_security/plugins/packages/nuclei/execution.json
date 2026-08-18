@@ -1,0 +1,16 @@
+{
+  "adapter": "container_cli",
+  "arguments": [
+    "-u", "{{target.url}}",
+    "-t", "/app/templates/portfolio_safe.yaml",
+    "-ni", "-dr", "-duc",
+    "-etags", "dos,fuzz,rce,sqli,xss,ssrf,xxe,cmdi,lfi",
+    "-rl", "1", "-c", "1", "-bs", "1",
+    "-timeout", "5", "-retries", "0",
+    "-jsonl", "-or", "-ot", "-no-stdin"
+  ],
+  "mounts": [
+    {"source": "templates", "target": "/app/templates", "read_only": true}
+  ],
+  "output_format": "jsonl"
+}
