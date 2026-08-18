@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from .domain import Audit, AuditCreateRequest, AuditCreatedEvent, AuditState
+from .domain import Audit, AuditCreateRequest, AuditEvent, AuditState
 
 
 class AuditRepository:
@@ -47,6 +47,7 @@ class AuditRepository:
             objective=request.objective,
             target=request.target,
             scope=request.scope,
+            authorization=request.authorization,
             credential_references=request.credential_references,
             time_budget_seconds=request.time_budget_seconds,
             cost_budget_usd=request.cost_budget_usd,
@@ -55,8 +56,9 @@ class AuditRepository:
             created_at=created_at,
         )
         payload = audit.model_dump_json()
-        event = AuditCreatedEvent(
+        event = AuditEvent(
             event_id=uuid4(),
+            event_type="audit.created",
             audit_id=audit.id,
             occurred_at=created_at,
             payload={"state": audit.state.value},
@@ -82,6 +84,35 @@ class AuditRepository:
             )
         return audit
 
+    def save_with_event(self, audit: Audit, event_type: str, payload: dict) -> Audit:
+        occurred_at = datetime.now(timezone.utc)
+        event = AuditEvent(
+            event_id=uuid4(),
+            event_type=event_type,
+            audit_id=audit.id,
+            occurred_at=occurred_at,
+            payload=payload,
+        )
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE audits SET payload = ? WHERE id = ?",
+                (audit.model_dump_json(), str(audit.id)),
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_events (id, audit_id, event_type, payload, occurred_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(event.event_id),
+                    str(audit.id),
+                    event.event_type,
+                    event.model_dump_json(),
+                    occurred_at.isoformat(),
+                ),
+            )
+        return audit
+
     def get(self, audit_id: UUID) -> Optional[Audit]:
         with self._connection() as connection:
             row = connection.execute(
@@ -89,7 +120,7 @@ class AuditRepository:
             ).fetchone()
         return Audit.model_validate_json(row["payload"]) if row else None
 
-    def list_events(self, audit_id: UUID) -> List[AuditCreatedEvent]:
+    def list_events(self, audit_id: UUID) -> List[AuditEvent]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
@@ -98,4 +129,4 @@ class AuditRepository:
                 """,
                 (str(audit_id),),
             ).fetchall()
-        return [AuditCreatedEvent.model_validate_json(row["payload"]) for row in rows]
+        return [AuditEvent.model_validate_json(row["payload"]) for row in rows]

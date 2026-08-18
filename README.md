@@ -4,7 +4,12 @@ This repository contains a proof of concept for a plugin-based, policy-controlle
 
 ## Flow 1: Create Audit
 
-The first implementation accepts a typed audit request, stores the audit in SQLite, sets the audit state to `CREATED`, and emits an immutable `audit.created` event. Credential values are not accepted; only opaque credential references are persisted.
+The current implementation supports two flows:
+
+1. Create an audit: accept a typed audit request, persist it in SQLite, set its state to `CREATED`, and emit an immutable `audit.created` event.
+2. Validate authorization and scope: compile the request into a machine-enforceable scope policy and transition the audit to `SCOPE_VALIDATED` or `SCOPE_REJECTED`.
+
+Credential values are not accepted; only opaque credential references are persisted.
 
 ### Setup
 
@@ -38,6 +43,7 @@ curl -X POST http://127.0.0.1:8000/audits \
     "objective": "Identify security issues in the authorized staging environment.",
     "target": {"target_type": "web_application", "identifier": "https://staging.example.test"},
     "scope": {"authorized_assets": ["staging.example.test"], "excluded_assets": ["production.example.test"]},
+    "authorization": {"authorization_id": "SEC-123", "authorized_by": "security@example.test", "valid_until": "2099-01-01T00:00:00Z", "allowed_operations": ["web_scan"]},
     "credential_references": ["vault://security/staging-test-account"],
     "time_budget_seconds": 3600,
     "cost_budget_usd": 25,
@@ -46,3 +52,11 @@ curl -X POST http://127.0.0.1:8000/audits \
 ```
 
 Expected result: `201 Created`, an audit in `CREATED` state, and an ID that can be fetched from `GET /audits/{audit_id}`. `GET /audits/{audit_id}/events` should return one `audit.created` event.
+
+### Validate scope
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/scope/validate
+```
+
+Expected result: `200 OK`, audit state `SCOPE_VALIDATED`, a normalized `scope_policy`, and a second `scope.validated` event. A target outside the authorized assets, expired authorization, or entirely prohibited operation set returns `422` and leaves the audit in `SCOPE_REJECTED`.

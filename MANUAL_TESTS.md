@@ -1,4 +1,4 @@
-# Flow 1 — Manual Test Checklist
+# Flow 1 and Flow 2 — Manual Test Checklist
 
 ## Preconditions
 
@@ -9,7 +9,7 @@ PYTHONPATH=src uvicorn intelligent_security.app:app --host 127.0.0.1 --port 8000
 
 Open `http://127.0.0.1:8000/docs` or use `curl` for the tests below.
 
-## Required Manual Tests
+## Flow 1 Manual Tests
 
 ### 1. Create an audit
 
@@ -76,3 +76,50 @@ On 18 August 2026, a local loopback server smoke test successfully:
 3. Retrieved its `audit.created` event with `GET /audits/{audit_id}/events` (`200 OK`).
 
 The remaining manual tests focus on input rejection and restart persistence.
+
+## Flow 2 Manual Tests
+
+### 7. Validate an in-scope audit
+
+Create an audit using the README request, then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/scope/validate
+```
+
+Expected:
+
+- Response is `200 OK`.
+- Audit state is `SCOPE_VALIDATED`.
+- `scope_policy.authorized_assets` contains the normalized hostname.
+- `scope_policy.network_allowlist` contains only authorized assets.
+- `scope_policy.allowed_operations` contains `web_scan`.
+- The event list now contains `audit.created` followed by `scope.validated`.
+
+### 8. Reject an out-of-scope target
+
+Create an audit where the target is `https://unapproved.example.test` but the authorized asset remains `staging.example.test`, then validate it.
+
+Expected:
+
+- Validation returns `422` with code `target_out_of_scope`.
+- Fetching the audit returns `SCOPE_REJECTED`.
+- The final event is `scope.rejected`.
+
+### 9. Reject expired authorization
+
+Set `authorization.valid_until` to a time in the past and validate the created audit.
+
+Expected: `422` with code `authorization_expired`, then `SCOPE_REJECTED`.
+
+### 10. Check idempotency
+
+Validate a successful audit twice.
+
+Expected: both calls return `200`, the audit remains `SCOPE_VALIDATED`, and only one `scope.validated` event exists.
+
+### 11. Check source-repository boundaries
+
+Create an audit with target type `source_repository`, target and authorized asset `https://github.com/example/security-demo`, and allowed operation `static_analysis`. Validate it.
+
+Expected: `scope_policy.filesystem_boundaries` contains the normalized repository URL and `network_allowlist` is empty.
