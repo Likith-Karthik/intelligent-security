@@ -90,19 +90,24 @@ Each target profile contains:
 
 ```mermaid
 flowchart TD
+    O[Operator-managed plugin sources] --> G[Plugin admission and registry refresh]
+    G --> R[Atomic capability registry snapshot]
     U[Authorized audit request] --> T[Target profiler]
-    T --> R[Capability registry]
+    T --> R
     R --> P[AI planner]
     P --> V[Plan validator and policy engine]
     V --> X[Execution scheduler]
 
-    X --> A[Native and CLI plugins]
-    X --> M[MCP adapter]
-    X --> L[LLM testing plugins]
+    X --> Q[Late-bound plugin resolver]
+    Q --> A[Native and CLI adapter]
+    Q --> M[Restricted MCP adapter]
+    Q --> L[LLM testing adapter]
+    Q --> W[REST API adapter]
 
-    A --> S[Isolated execution sandboxes]
+    A --> S[Isolated execution boundary]
     M --> S
     L --> S
+    W --> S
 
     S --> E[Evidence store]
     E --> N[Normalization and correlation]
@@ -134,7 +139,11 @@ Maintains the capabilities currently available to the platform. It records:
 - Health and availability
 - Historical reliability
 
-The planner selects capabilities such as `source.static_analysis`, not specific implementations such as Semgrep. The registry resolves a capability to an installed plugin.
+The registry is an abstraction with replaceable backends. For the POC, configured plugin sources are refreshed through an operator-authorized administration endpoint. Refresh builds and validates a new immutable registry snapshot, runs bounded health checks, and swaps the snapshot atomically only if admission succeeds. A failed refresh leaves the previous snapshot active.
+
+The agent has read-only access to the current snapshot. It cannot install, remove, enable, or configure executable plugins. Future business requirements can replace the POC backend with startup-only discovery, filesystem watching, database-backed registration, remote workers, or a signed marketplace without changing planner or scheduler interfaces.
+
+The planner selects capabilities such as `source.static_analysis`, not implementations such as Semgrep. It learns what is currently possible from sanitized capability descriptors in the active snapshot. Raw plugin documentation, MCP prompts, executable commands, and credentials are never inserted directly into the planner context.
 
 ### 7.4 AI Planner
 
@@ -160,18 +169,19 @@ Rejected steps are returned to the planner with a structured reason or escalated
 
 ### 7.6 Execution Scheduler
 
-Runs approved plan steps according to dependencies. Independent steps may run concurrently. The scheduler manages timeouts, retries, cancellation, failure handling, and plugin fallback.
+Persists and releases approved capability steps according to dependencies. Independent steps may run concurrently. It manages timeouts, retries, cancellation, and failure handling, but it does not select or invoke a plugin implementation. The scheduler stores capability requirements only, so a plugin can be added, removed, or upgraded without rewriting a plan or schedule.
 
 ### 7.7 Plugin Runtime
 
-Provides a common execution interface for:
+Resolves a scheduled capability to a compatible healthy implementation immediately before invocation, then provides a common execution interface for:
 
 - Native Python plugins
 - Allowlisted command-line tools
 - REST API integrations
 - MCP servers
+- LLM red-team and evaluation frameworks
 
-All plugin types pass through the same policy, execution, logging, and evidence pipeline.
+All plugin types implement a versioned capability contract and pass through the same policy, execution, logging, and evidence pipeline. The chosen plugin and version are recorded only in the execution/evidence record, enabling safe fallback to another implementation with the same contract.
 
 ### 7.8 Sandbox Manager
 
@@ -210,6 +220,15 @@ Produces human-readable and machine-readable reports containing:
 
 ## 8. Plugin Contract
 
+The plugin system separates two concepts:
+
+- **Plugin** — a security implementation that advertises one or more capabilities, such as Nuclei, Semgrep, Promptfoo, Garak, or an MCP security server.
+- **Adapter** — trusted core code that knows how to invoke a class of implementation, such as native Python, allowlisted CLI/container, REST, restricted MCP, or LLM-testing orchestration.
+
+Adding a plugin normally requires a manifest and adapter-compatible configuration, not changes to planning, policy, scheduling, or execution orchestration. A new invocation mechanism may require one new adapter, after which any number of plugins can reuse it.
+
+Plugin `kind` is descriptive metadata, not a core-code switch. Native security tools, MCP integrations, LLM-testing frameworks, and future categories all follow the same registry and capability interfaces. Core behavior branches only through the declared adapter interface. Therefore, any new plugin using an existing adapter is data-only; only a genuinely new transport or runtime mechanism requires adapter implementation code.
+
 Every plugin implements the following lifecycle:
 
 1. `discover` — advertise supported capabilities.
@@ -225,32 +244,47 @@ Example manifest:
 ```yaml
 id: nuclei
 version: 1.0.0
+kind: native_security_tool
+adapter: container_cli
+enabled: true
 
 capabilities:
-  - web.vulnerability_scan
-  - api.vulnerability_scan
-
-accepts:
-  target_types:
-    - web_application
-    - api
-  inputs:
-    url: string
-    severity: string[]
-    template_tags: string[]
-
-risk:
-  network_access: target_only
-  destructive: false
-  credentials: optional
+  - id: web.vulnerability_scan
+    contract_version: 1
+    description: Scan an authorized web target with approved templates.
+    target_types: [web_application, api]
+    required_operation: web_scan
+    input_schema: audit-web-target/v1
+    output_schema: finding-batch/v1
+    risk:
+      network_access: target_only
+      destructive: false
+      credentials: optional
 
 execution:
   runtime: container
+  entrypoint_ref: allowlist://nuclei/run
   timeout_seconds: 900
-
-outputs:
-  schema: finding-batch/v1
 ```
+
+The same envelope applies to other kinds. For example, an MCP plugin uses `adapter: restricted_mcp` and references an operator-approved server configuration; an LLM testing plugin uses `adapter: llm_testing` or an existing CLI/REST adapter while advertising capabilities such as `llm.prompt_injection_test`.
+
+### 8.1 Admission and runtime refresh
+
+For the POC:
+
+1. An operator adds, removes, enables, or disables a manifest in an approved plugin source.
+2. An authorized administrator calls the registry refresh endpoint.
+3. The admission layer validates manifest schema, unique IDs, supported adapter, capability contract versions, referenced allowlist entries, and prohibited secret values.
+4. Bounded adapter health checks produce availability metadata.
+5. A complete immutable snapshot replaces the prior snapshot atomically.
+6. New audits use the new snapshot. Existing approved/scheduled steps resolve against the latest compatible implementation at execution time or return a capability gap for replanning.
+
+The refresh endpoint reloads metadata and health state; it does not download packages, run installer commands, or accept arbitrary executable paths.
+
+### 8.2 Planner discovery view
+
+The planner receives only the fields needed to plan safely: capability ID and contract version, description, compatible target types, required authorization operation, required typed inputs, risk class, availability, estimated duration/cost, and relevant constraints. Adapter configuration, server instructions, shell arguments, credentials, and untrusted free-form plugin content remain outside model context.
 
 ## 9. Common Capability Taxonomy
 
@@ -407,6 +441,7 @@ The POC is successful when it can:
 - Multiple implementations per capability with reliability-based selection
 - Distributed execution workers
 - Plugin marketplace and signed plugin manifests
+- Alternative registry backends and configurable refresh strategies
 - Cloud and container-security targets
 - Integration with ticketing and vulnerability-management platforms
 - Learning from historical execution outcomes
@@ -422,3 +457,4 @@ The POC is successful when it can:
 - Should PostgreSQL be used from the start or introduced after the POC?
 - Which deliberately vulnerable applications will form the evaluation set?
 - What level of plugin signing or trust verification is required for the POC?
+- Should production refresh require staged rollout, worker draining, or snapshot pinning for active audits?

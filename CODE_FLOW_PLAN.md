@@ -58,7 +58,10 @@ src/
 │   └── profilers/
 ├── registry/
 │   ├── service.py
-│   └── repository.py
+│   ├── repository.py
+│   ├── admission.py
+│   ├── snapshot.py
+│   └── backends.py
 ├── planning/
 │   ├── service.py
 │   ├── prompts.py
@@ -69,6 +72,9 @@ src/
 ├── scheduling/
 │   ├── scheduler.py
 │   └── state_machine.py
+├── capability_contracts/
+│   ├── schemas.py
+│   └── versions.py
 ├── execution/
 │   ├── service.py
 │   ├── sandbox.py
@@ -77,8 +83,13 @@ src/
 ├── plugins/
 │   ├── sdk.py
 │   ├── loader.py
-│   ├── cli_adapter.py
-│   ├── mcp_adapter.py
+│   ├── manifests/
+│   ├── adapters/
+│   │   ├── native.py
+│   │   ├── container_cli.py
+│   │   ├── rest.py
+│   │   ├── restricted_mcp.py
+│   │   └── llm_testing.py
 │   └── builtins/
 ├── evidence/
 │   ├── collector.py
@@ -100,6 +111,17 @@ src/
 ```
 
 The directories describe ownership boundaries. They do not require separate services in the POC; the first implementation should be a modular monolith.
+
+### 3.1 Plugin extensibility boundary
+
+Core flows depend on capability and adapter interfaces, never on concrete tool packages.
+
+- A **plugin manifest** describes a security implementation, supported capability contracts, risk, estimates, health-check metadata, and a reference to an approved adapter configuration.
+- A **capability contract** defines the stable semantic input/output boundary visible to planning and policy.
+- An **adapter** is trusted core infrastructure for one invocation mechanism: native Python, allowlisted CLI/container, REST, restricted MCP, or LLM-testing orchestration.
+- A **registry backend** supplies admitted manifests. The POC uses configured local sources plus an operator-triggered refresh, but the interface permits startup scanning, file watching, a database, remote workers, or a marketplace later.
+
+The planner has read-only access to a sanitized immutable registry snapshot. It may select advertised capabilities but cannot install software, register endpoints, edit manifests, choose arbitrary commands, or bypass adapter policy.
 
 ## 4. Flow 1 — Create Audit
 
@@ -221,11 +243,13 @@ Return healthy capabilities applicable to the target and audit objective.
 
 ### Processing
 
-1. Load installed plugin manifests.
-2. Run or read cached plugin health checks.
-3. Match target types and required inputs.
+1. Read the current immutable registry snapshot produced by the latest successful operator refresh.
+2. Read cached, bounded health-check results for native tools, CLI/container tools, REST integrations, MCP servers, and LLM-testing plugins.
+3. Match capability contract version, target types, required typed inputs, and authorization operation.
 4. Filter capabilities forbidden by policy.
-5. Rank implementations by availability, reliability, cost, and preference.
+5. Aggregate equivalent implementations under the same capability contract.
+6. Rank capability choices by availability, reliability, cost, and preference.
+7. Produce a sanitized planner view without commands, MCP instructions, credentials, or adapter configuration.
 
 ### Output
 
@@ -241,7 +265,13 @@ Return healthy capabilities applicable to the target and audit objective.
 
 ### Completion test
 
-Disabling a plugin removes its capabilities without requiring changes to planner or scheduler code.
+After an operator adds or disables a native, MCP, or LLM-testing plugin and refreshes the registry, its admitted capabilities appear or disappear from new planner context without changing or restarting planner and scheduler code. A failed refresh preserves the previous snapshot.
+
+### Registry administration boundary
+
+The POC exposes an authenticated administration operation equivalent to `POST /admin/plugins/refresh`. It performs metadata admission and bounded health checks only. Installation, package download, endpoint configuration, allowlist changes, and secret provisioning remain external operator workflows.
+
+The refresh strategy is configured behind `RegistryBackend` and `RegistryRefreshPolicy` interfaces so business requirements can later choose manual refresh, startup-only loading, watched sources, scheduled refresh, or a managed control plane.
 
 ## 8. Flow 5 — Generate Audit Plan
 
@@ -254,14 +284,15 @@ Ask the model to create an explainable, typed DAG using only available capabilit
 - Audit objective
 - Validated scope summary
 - Target profile
-- Allowed capability descriptions
+- Allowed sanitized capability descriptors from one registry snapshot
+- Capability contract versions, risks, constraints, availability, and estimates
 - Budget
 - Approval requirements
 - Previous planning errors, if replanning
 
 ### Processing
 
-1. Build a bounded planner request.
+1. Capture the active registry snapshot ID and build a bounded planner request from its sanitized capabilities.
 2. Call the model through a provider-neutral gateway.
 3. Parse structured output.
 4. Validate the JSON schema.
@@ -296,7 +327,7 @@ Invalid output may be repaired or regenerated a bounded number of times. It must
 
 ### Completion test
 
-The planner cannot reference a capability omitted from its supplied capability list.
+The planner cannot reference a capability omitted from its supplied registry snapshot and cannot see plugin commands, MCP prompts, credentials, or adapter configuration.
 
 ## 9. Flow 6 — Validate and Approve Plan
 
@@ -339,14 +370,18 @@ A valid plan containing one unauthorized step cannot enter the execution queue.
 
 Convert the approved DAG into executable work while respecting dependencies and budgets.
 
+The schedule is capability-level only. It must never contain a plugin identifier, plugin version, command, container image, or adapter configuration. This preserves the ability to add, remove, upgrade, or replace implementations after scheduling.
+
 ### Processing
 
 1. Mark dependency-free steps as `READY`.
 2. Enforce audit and plugin concurrency limits.
-3. Dispatch ready steps.
-4. Update dependent steps after completion.
-5. Handle cancellation, timeout, and retry policies.
-6. Stop or replan when a required capability becomes unavailable.
+3. Reserve time and cost from the capability metadata selected during policy validation.
+4. Persist capability requirements and dependency state only.
+5. Hand a `READY` capability step to Flow 8; Flow 8 resolves the implementation at invocation time.
+6. Update dependent steps after completion.
+7. Handle cancellation, timeout, and retry policies.
+8. Stop or replan when no implementation still satisfies the required capability contract.
 
 ### Plan step states
 
@@ -373,16 +408,20 @@ Two independent steps can run concurrently, while a dependent step cannot start 
 
 Resolve an approved capability to a plugin and execute it in an isolated runtime.
 
+Resolution happens as late as possible: immediately before invocation, not during planning or scheduling. The resolver accepts a capability contract and selects any installed implementation that satisfies it. The chosen plugin/version is then recorded in the immutable execution record, rather than in the audit plan or schedule.
+
 ### Processing
 
-1. Resolve the preferred healthy plugin.
-2. Validate the plugin manifest and version.
-3. Request scoped credentials.
-4. Create the sandbox and network policy.
-5. Translate typed inputs into the plugin-specific invocation.
-6. Execute with resource and time limits.
-7. Capture exit status, logs, output, and artifacts.
-8. Revoke credentials and destroy the sandbox.
+1. Refresh or re-read health state according to policy, then query the latest admitted implementations by capability contract, not by plugin name.
+2. Filter enabled, healthy implementations by contract version, target type, required operation, input/output schemas, and policy constraints.
+3. Rank candidates using declared reliability, cost, and duration; select the first compatible implementation.
+4. Validate the selected plugin manifest and adapter handshake.
+5. Request scoped credentials.
+6. Create the sandbox and network policy.
+7. Translate typed inputs into the plugin-specific invocation.
+8. Execute with resource and time limits.
+9. Capture the selected plugin/version, exit status, logs, output, and artifacts in an immutable execution record.
+10. Revoke credentials and destroy the sandbox.
 
 ### Adapters
 
@@ -390,6 +429,7 @@ Resolve an approved capability to a plugin and execute it in an isolated runtime
 - Allowlisted CLI adapter
 - REST adapter
 - Restricted MCP adapter
+- LLM-testing orchestration adapter
 
 ### Primary modules
 
@@ -397,18 +437,19 @@ Resolve an approved capability to a plugin and execute it in an isolated runtime
 - `execution/sandbox.py`
 - `execution/credentials.py`
 - `plugins/sdk.py`
-- `plugins/*_adapter.py`
+- `plugins/adapters/*`
 
 ### Failure behavior
 
 - Retry transient failures only.
 - Do not retry policy or scope failures.
 - Try a fallback implementation only when the capability semantics match.
+- If no implementation satisfies the persisted capability contract, do not execute; emit a capability-unavailable result for policy-driven replanning.
 - Preserve partial logs and artifacts.
 
 ### Completion test
 
-A plugin cannot connect outside the target allowlist or read another audit's workspace.
+A native, MCP, or LLM-testing plugin cannot connect outside the target allowlist or read another audit's workspace. Removing one implementation and refreshing the registry causes a compatible fallback to be selected without changing the plan or schedule; otherwise execution returns a capability gap without invocation.
 
 ## 12. Flow 9 — Capture Raw Evidence
 
@@ -655,7 +696,7 @@ Generate a plan from target metadata and the live capability registry, then vali
 
 ### Milestone D — Plugin Replacement
 
-Disable one implementation and demonstrate fallback selection or a clear capability-gap response.
+Add, disable, and remove native-tool, MCP, and LLM-testing plugin manifests through an operator-controlled registry refresh. Demonstrate planner discovery updates, late-bound fallback selection, and a clear capability-gap response without core-code changes or service restart.
 
 ### Milestone E — Evidence-Backed Demo
 

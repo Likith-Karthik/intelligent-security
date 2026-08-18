@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Annotated, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 CredentialReference = Annotated[
@@ -24,6 +24,10 @@ class AuditState(str, Enum):
     TARGET_PROFILED = "TARGET_PROFILED"
     CAPABILITIES_DISCOVERED = "CAPABILITIES_DISCOVERED"
     PLAN_PROPOSED = "PLAN_PROPOSED"
+    PLAN_PENDING_APPROVAL = "PLAN_PENDING_APPROVAL"
+    PLAN_APPROVED = "PLAN_APPROVED"
+    PLAN_REJECTED = "PLAN_REJECTED"
+    PLAN_SCHEDULED = "PLAN_SCHEDULED"
 
 
 class AuditOperation(str, Enum):
@@ -91,8 +95,17 @@ class PluginHealth(str, Enum):
     DECLARED_UNHEALTHY = "declared_unhealthy"
 
 
+class PluginAdapter(str, Enum):
+    NATIVE = "native"
+    CONTAINER_CLI = "container_cli"
+    REST = "rest"
+    RESTRICTED_MCP = "restricted_mcp"
+    LLM_TESTING = "llm_testing"
+
+
 class PluginCapability(BaseModel):
     capability: str = Field(..., min_length=3, max_length=200)
+    contract_version: str = Field(default="1", min_length=1, max_length=50)
     description: str = Field(..., min_length=1, max_length=1000)
     target_types: List[str] = Field(..., min_length=1, max_length=50)
     required_operation: AuditOperation
@@ -100,6 +113,8 @@ class PluginCapability(BaseModel):
     estimated_duration_seconds: int = Field(..., ge=1, le=604800)
     estimated_cost_usd: float = Field(..., ge=0, le=1000000)
     reliability: float = Field(..., ge=0, le=1)
+    input_schema: str = Field(default="policy-controlled/v1", min_length=1, max_length=200)
+    output_schema: str = Field(default="finding-batch/v1", min_length=1, max_length=200)
 
 
 class PluginManifest(BaseModel):
@@ -107,6 +122,8 @@ class PluginManifest(BaseModel):
 
     plugin_id: str = Field(..., min_length=3, max_length=200)
     plugin_version: str = Field(..., min_length=1, max_length=100)
+    kind: str = Field(default="native_security_tool", min_length=1, max_length=100)
+    adapter: PluginAdapter = PluginAdapter.CONTAINER_CLI
     enabled: bool = True
     health: PluginHealth = PluginHealth.DECLARED_HEALTHY
     capabilities: List[PluginCapability] = Field(..., min_length=1, max_length=100)
@@ -115,6 +132,7 @@ class PluginManifest(BaseModel):
 class CapabilityCandidate(BaseModel):
     rank: int
     capability: str
+    contract_version: str = "1"
     description: str
     plugin_id: str
     plugin_version: str
@@ -133,6 +151,7 @@ class CapabilityGap(BaseModel):
 
 class CapabilityDiscovery(BaseModel):
     registry_version: str
+    registry_snapshot_id: str = "legacy"
     target_type: str
     candidates: List[CapabilityCandidate]
     gaps: List[CapabilityGap]
@@ -164,12 +183,78 @@ class PlanStep(BaseModel):
     inputs: dict = Field(default_factory=dict)
     reason: str = Field(..., min_length=1, max_length=2000)
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def normalize_numeric_step_id(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Plan step IDs must be strings or integers.")
+        if isinstance(value, int):
+            return str(value)
+        return value
+
+    @field_validator("inputs")
+    @classmethod
+    def inputs_must_be_empty_during_planning(cls, value: dict) -> dict:
+        if value:
+            raise ValueError(
+                "Planning cannot supply tool inputs; execution supplies policy-controlled typed inputs."
+            )
+        return value
+
 
 class AuditPlan(BaseModel):
     plan_version: str
     model_profile_id: str
+    registry_snapshot_id: str = "legacy"
     steps: List[PlanStep] = Field(..., min_length=1, max_length=100)
     generated_at: datetime
+
+
+class PlanValidationStatus(str, Enum):
+    APPROVED = "APPROVED"
+    PENDING_HUMAN_APPROVAL = "PENDING_HUMAN_APPROVAL"
+    REJECTED = "REJECTED"
+
+
+class PlanValidation(BaseModel):
+    status: PlanValidationStatus
+    estimated_duration_seconds: int = Field(..., ge=0)
+    estimated_cost_usd: float = Field(..., ge=0)
+    approval_required: bool
+    registry_snapshot_id: str = "legacy"
+    reasons: List[str] = Field(default_factory=list)
+    validated_at: datetime
+
+
+class PlanApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: str = Field(..., pattern=r"^(approve|reject)$")
+    reviewed_by: str = Field(..., min_length=3, max_length=200)
+    reason: str = Field(..., min_length=1, max_length=1000)
+
+
+class ScheduledStepStatus(str, Enum):
+    PENDING = "PENDING"
+    READY = "READY"
+
+
+class ScheduledStep(BaseModel):
+    plan_step_id: str
+    capability: str
+    depends_on: List[str]
+    status: ScheduledStepStatus
+    estimated_duration_seconds: int = Field(..., ge=1)
+    estimated_cost_usd: float = Field(..., ge=0)
+
+
+class ExecutionSchedule(BaseModel):
+    schedule_version: str
+    registry_snapshot_id: str = "legacy"
+    steps: List[ScheduledStep] = Field(..., min_length=1, max_length=100)
+    reserved_duration_seconds: int = Field(..., ge=0)
+    reserved_cost_usd: float = Field(..., ge=0)
+    scheduled_at: datetime
 
 
 class AuditCreateRequest(BaseModel):
@@ -210,6 +295,12 @@ class Audit(BaseModel):
     planner_model_profile: Optional[str] = None
     audit_plan: Optional[AuditPlan] = None
     plan_proposed_at: Optional[datetime] = None
+    plan_validation: Optional[PlanValidation] = None
+    plan_validated_at: Optional[datetime] = None
+    plan_approved_at: Optional[datetime] = None
+    plan_approved_by: Optional[str] = None
+    execution_schedule: Optional[ExecutionSchedule] = None
+    plan_scheduled_at: Optional[datetime] = None
 
 
 class AuditEvent(BaseModel):

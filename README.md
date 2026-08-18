@@ -11,6 +11,8 @@ The current implementation supports two flows:
 3. Profile the target: derive a safe, deterministic target profile from validated metadata and transition the audit to `TARGET_PROFILED`.
 4. Discover compatible capabilities: load plugin manifests, filter them against profile and scope, rank candidates, and transition the audit to `CAPABILITIES_DISCOVERED`.
 5. Generate an audit plan: use an approved model profile to produce a structured plan, validate its shape and dependencies, and transition the audit to `PLAN_PROPOSED`.
+6. Validate and approve a plan: re-check proposed steps against persisted scope, discovered capabilities, plugin health, and budgets before transitioning to `PLAN_APPROVED` or a human approval checkpoint.
+7. Schedule approved steps: persist the approved DAG with `READY` dependency-free steps and `PENDING` dependent steps; this stage does not execute tools.
 
 Credential values are not accepted; only opaque credential references are persisted.
 
@@ -80,9 +82,26 @@ curl -X POST http://127.0.0.1:8000/audits/{audit_id}/capabilities/discover
 
 Expected result: `200 OK`, state `CAPABILITIES_DISCOVERED`, ranked `capability_discovery.candidates`, any `gaps`, and a `capabilities.discovered` event. The bundled manifests declare Semgrep, Nuclei, Promptfoo, and Nmap capabilities. They are declarations only: Flow 4 does not execute binaries or verify their runtime dependencies.
 
+### Refresh the plugin registry
+
+The active registry is an immutable snapshot. Configure `PLUGIN_REGISTRY_ADMIN_TOKEN` in local deployment configuration to enable the operator-only refresh endpoint, then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/admin/plugins/refresh \
+  -H "X-Plugin-Registry-Token: $PLUGIN_REGISTRY_ADMIN_TOKEN"
+```
+
+Refresh reads only the configured manifest source, validates every manifest, and swaps in the resulting snapshot atomically. It does not install packages, execute plugin binaries, accept arbitrary executable paths, or change allowlists. If admission fails, the prior snapshot remains active. The endpoint is disabled when no token is configured.
+
 ### Configure a planner model
 
-Model profiles are held centrally in `config/model_profiles.json`. The checked-in configuration is intentionally empty until an approved provider and model are selected. API keys must be referenced, never stored in this file or an audit request.
+Model profiles are held centrally in `config/model_profiles.json`, which is intentionally ignored by Git because it can reveal internal endpoint details. Start from the committed `config/model_profiles.example.json`:
+
+```bash
+cp config/model_profiles.example.json config/model_profiles.json
+```
+
+API keys must be referenced, never stored in this file or an audit request.
 
 Example profile shape:
 
@@ -108,6 +127,21 @@ Example profile shape:
 
 Optionally set `planner_model_profile` in `POST /audits` to select a non-default approved profile. Otherwise the unique enabled profile marked `default_for_purpose` is used.
 
+Before running the service, place a newly generated key in the process environment:
+
+```bash
+cp .env.example .env
+# Edit .env locally and set PLANNER_MODEL_API_KEY plus (optionally) PLUGIN_REGISTRY_ADMIN_TOKEN.
+```
+
+Start the service with the local environment file:
+
+```bash
+uvicorn intelligent_security.app:app --app-dir src --env-file .env --reload
+```
+
+Do not commit this value, add it to `config/model_profiles.json`, or place it in an audit request.
+
 ### Generate an audit plan
 
 After configuring a profile and making its `env://` credential available to the running service:
@@ -117,3 +151,27 @@ curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/generate
 ```
 
 Expected result: `200 OK`, state `PLAN_PROPOSED`, a structured `audit_plan`, and a `plan.proposed` event. Before model configuration, the endpoint returns `503` with `model_profile_unavailable`.
+
+### Validate and approve a plan
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/validate
+```
+
+The policy engine re-checks each step against the stored capability discovery, authorization, plugin health, and audit time/cost budgets. A compliant plan transitions to `PLAN_APPROVED` and emits `plan.approved`. An invalid plan transitions to `PLAN_REJECTED` and emits `plan.rejected` with a machine-readable reason.
+
+Set `approval_policy` to `human_approval_required` when creating an audit to require a reviewer before execution. The validation call then transitions to `PLAN_PENDING_APPROVAL`; submit the reviewer decision with:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/approval \
+  -H 'Content-Type: application/json' \
+  -d '{"decision":"approve","reviewed_by":"security@example.test","reason":"Scope confirmed."}'
+```
+
+### Schedule an approved plan
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/schedule
+```
+
+Only `PLAN_APPROVED` audits can be scheduled. The response transitions to `PLAN_SCHEDULED`, persists only capability-level steps, reserves declared time/cost estimates, and marks dependency-free steps `READY`. It does not bind a plugin implementation; Flow 8 resolves a healthy compatible implementation immediately before invocation. No plugin is invoked during scheduling.

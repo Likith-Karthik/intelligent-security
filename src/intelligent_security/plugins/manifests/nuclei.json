@@ -1,6 +1,8 @@
 {
   "plugin_id": "nuclei",
   "plugin_version": "1",
+  "kind": "native_security_tool",
+  "adapter": "container_cli",
   "enabled": true,
   "health": "declared_healthy",
   "capabilities": [

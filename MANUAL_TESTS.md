@@ -220,3 +220,62 @@ Expected:
 Use a controlled test model or mock endpoint that returns a plan with an unknown capability, duplicate step ID, unknown dependency, or dependency cycle.
 
 Expected: `422` with the corresponding planning error, while the audit remains `CAPABILITIES_DISCOVERED` and no `plan.proposed` event is emitted.
+
+## Flow 6 Manual Tests
+
+### 21. Validate and auto-approve a compliant plan
+
+After generating a compliant plan for an audit using `human_approval_for_destructive_actions`, call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/validate
+```
+
+Expected: `200 OK`, state `PLAN_APPROVED`, a validation summary, and a final `plan.approved` event attributed to `policy-engine`.
+
+### 22. Require and record a human decision
+
+Create an otherwise valid audit with `approval_policy` set to `human_approval_required`, generate the plan, and validate it. Then submit a reviewer decision:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/approval \
+  -H 'Content-Type: application/json' \
+  -d '{"decision":"reject","reviewed_by":"security@example.test","reason":"Outside the approved maintenance window."}'
+```
+
+Expected: validation moves the audit to `PLAN_PENDING_APPROVAL`; the decision moves it to `PLAN_REJECTED` and emits `plan.rejected` with reviewer identity and reason.
+
+### 23. Reject an over-budget plan
+
+Create an audit with a `time_budget_seconds` lower than the chosen capability's declared duration, then generate and validate its plan.
+
+Expected: `200 OK`, state `PLAN_REJECTED`, and a `plan.rejected` event with code `time_budget_exceeded`. The plan must not become executable.
+
+## Flow 7 Manual Tests
+
+### 24. Schedule an approved plan
+
+After Flow 6 reaches `PLAN_APPROVED`, call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/schedule
+```
+
+Expected: `200 OK`, state `PLAN_SCHEDULED`, an `execution_schedule`, and a `plan.scheduled` event. Steps without dependencies are `READY`; dependent steps are `PENDING`. No tool is executed.
+
+### 25. Confirm scheduling is approval-gated and idempotent
+
+Call the endpoint before plan approval, then call it twice after approval.
+
+Expected: the first call returns `409`; both later calls return the same persisted schedule and only one `plan.scheduled` event exists.
+
+### 26. Refresh the admitted plugin registry
+
+Set `PLUGIN_REGISTRY_ADMIN_TOKEN` in `.env`, add or disable a manifest in the configured plugin-manifest source, then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/admin/plugins/refresh \
+  -H "X-Plugin-Registry-Token: $PLUGIN_REGISTRY_ADMIN_TOKEN"
+```
+
+Expected: `200 OK` with a new `snapshot_id`. New Flow 4 discoveries use that snapshot. An incorrect token returns `403`; an invalid or duplicate manifest returns `422` and the prior snapshot remains active.

@@ -1,6 +1,8 @@
 {
   "plugin_id": "promptfoo",
   "plugin_version": "1",
+  "kind": "llm_testing_framework",
+  "adapter": "llm_testing",
   "enabled": true,
   "health": "declared_healthy",
   "capabilities": [

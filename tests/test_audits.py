@@ -3,6 +3,7 @@ import json
 from fastapi.testclient import TestClient
 
 from intelligent_security.app import create_app
+from intelligent_security.planning.service import AuditPlanner
 
 
 def valid_request() -> dict:
@@ -263,8 +264,9 @@ def test_capability_discovery_matches_web_scan_to_nuclei(tmp_path) -> None:
     assert discovery["gaps"] == []
     assert discovery["candidates"] == [
         {
-            "rank": 1,
-            "capability": "web.vulnerability_scan",
+                "rank": 1,
+                "capability": "web.vulnerability_scan",
+                "contract_version": "1",
             "description": "Run template-based vulnerability scans against an authorized web application or API.",
             "plugin_id": "nuclei",
             "plugin_version": "1",
@@ -374,3 +376,453 @@ def test_capability_discovery_loads_a_new_manifest_without_code_changes(tmp_path
     candidate = response.json()["capability_discovery"]["candidates"][0]
     assert candidate["plugin_id"] == "custom-web-scanner"
     assert candidate["capability"] == "web.custom_scan"
+
+
+class FakeModelGateway:
+    def __init__(self, response: dict) -> None:
+        self.response = response
+        self.system_prompt = None
+        self.user_prompt = None
+
+    def generate_json(self, profile, system_prompt: str, user_prompt: str) -> dict:
+        self.system_prompt = system_prompt
+        self.user_prompt = user_prompt
+        return self.response
+
+
+def write_model_profiles(path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "profile_id": "test-planner",
+                        "purpose": "audit_planning",
+                        "provider": "openai_compatible",
+                        "model": "test-model",
+                        "credential_reference": "env://TEST_MODEL_KEY",
+                        "base_url": "http://test-model.invalid/v1",
+                        "temperature": 0.1,
+                        "max_output_tokens": 3000,
+                        "timeout_seconds": 60,
+                        "enabled": True,
+                        "default_for_purpose": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def prepared_plan_client(
+    tmp_path, generated_plan: dict, approval_policy: str = None, time_budget_seconds: int = None
+) -> tuple:
+    profiles_path = tmp_path / "model_profiles.json"
+    write_model_profiles(profiles_path)
+    app = create_app(str(tmp_path / "audits.db"), model_profiles_path=str(profiles_path))
+    app.state.audit_planner = AuditPlanner(FakeModelGateway(generated_plan))
+    client = TestClient(app)
+    request = valid_request()
+    if approval_policy is not None:
+        request["approval_policy"] = approval_policy
+    if time_budget_seconds is not None:
+        request["time_budget_seconds"] = time_budget_seconds
+    created = client.post("/audits", json=request).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/profile").status_code == 200
+    assert client.post(f"/audits/{created['id']}/capabilities/discover").status_code == 200
+    return client, created
+
+
+def test_plan_generation_creates_a_validated_plan_and_event(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": "scan-web-app",
+                    "capability": "web.vulnerability_scan",
+                    "depends_on": [],
+                    "inputs": {},
+                    "reason": "The target is an authorized web application.",
+                }
+            ]
+        },
+    )
+
+    response = client.post(f"/audits/{created['id']}/plan/generate")
+
+    assert response.status_code == 200
+    audit = response.json()
+    assert audit["state"] == "PLAN_PROPOSED"
+    assert audit["audit_plan"]["model_profile_id"] == "test-planner"
+    assert audit["audit_plan"]["registry_snapshot_id"] == audit["capability_discovery"]["registry_snapshot_id"]
+    assert audit["audit_plan"]["steps"][0]["capability"] == "web.vulnerability_scan"
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "plan.proposed"
+
+
+def test_plan_generation_rejects_an_unknown_capability(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": "unapproved-step",
+                    "capability": "network.port_discovery",
+                    "depends_on": [],
+                    "inputs": {},
+                    "reason": "This must be rejected because it was not discovered.",
+                }
+            ]
+        },
+    )
+
+    response = client.post(f"/audits/{created['id']}/plan/generate")
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "unknown_capability"
+    audit = client.get(f"/audits/{created['id']}").json()
+    assert audit["state"] == "CAPABILITIES_DISCOVERED"
+
+
+def test_plan_generation_rejects_cyclic_dependencies(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": "first",
+                    "capability": "web.vulnerability_scan",
+                    "depends_on": ["second"],
+                    "inputs": {},
+                    "reason": "Cycle test first step.",
+                },
+                {
+                    "id": "second",
+                    "capability": "web.vulnerability_scan",
+                    "depends_on": ["first"],
+                    "inputs": {},
+                    "reason": "Cycle test second step.",
+                },
+            ]
+        },
+    )
+
+    response = client.post(f"/audits/{created['id']}/plan/generate")
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "cyclic_plan"
+
+
+def test_plan_generation_rejects_model_supplied_tool_inputs(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": "scan-web-app",
+                    "capability": "web.vulnerability_scan",
+                    "depends_on": [],
+                    "inputs": {"url": "https://untrusted.example.test"},
+                    "reason": "Inputs must be rejected during planning.",
+                }
+            ]
+        },
+    )
+
+    response = client.post(f"/audits/{created['id']}/plan/generate")
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_model_output"
+
+
+def test_plan_generation_normalizes_numeric_step_ids(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "capability": "web.vulnerability_scan",
+                    "depends_on": [],
+                    "inputs": {},
+                    "reason": "The local model may represent sequential IDs as numbers.",
+                }
+            ]
+        },
+    )
+
+    response = client.post(f"/audits/{created['id']}/plan/generate")
+
+    assert response.status_code == 200
+    assert response.json()["audit_plan"]["steps"][0]["id"] == "1"
+
+
+def generated_web_scan_plan() -> dict:
+    return {
+        "steps": [
+            {
+                "id": "scan-web-app",
+                "capability": "web.vulnerability_scan",
+                "depends_on": [],
+                "inputs": {},
+                "reason": "Scan the authorized web application.",
+            }
+        ]
+    }
+
+
+def test_plan_validation_auto_approves_a_compliant_plan(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    assert client.post(f"/audits/{created['id']}/plan/generate").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/plan/validate")
+
+    assert response.status_code == 200
+    audit = response.json()
+    assert audit["state"] == "PLAN_APPROVED"
+    assert audit["plan_approved_by"] == "policy-engine"
+    assert audit["plan_validation"]["status"] == "APPROVED"
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "plan.approved"
+
+
+def test_plan_validation_requests_human_approval_when_policy_requires_it(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path, generated_web_scan_plan(), approval_policy="human_approval_required"
+    )
+    assert client.post(f"/audits/{created['id']}/plan/generate").status_code == 200
+
+    pending = client.post(f"/audits/{created['id']}/plan/validate")
+    assert pending.status_code == 200
+    assert pending.json()["state"] == "PLAN_PENDING_APPROVAL"
+    assert pending.json()["plan_validation"]["approval_required"] is True
+
+    approved = client.post(
+        f"/audits/{created['id']}/plan/approval",
+        json={"decision": "approve", "reviewed_by": "security@example.test", "reason": "Scope confirmed."},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["state"] == "PLAN_APPROVED"
+    assert approved.json()["plan_approved_by"] == "security@example.test"
+
+
+def test_plan_validation_rejects_a_plan_that_exceeds_its_time_budget(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path, generated_web_scan_plan(), time_budget_seconds=60
+    )
+    assert client.post(f"/audits/{created['id']}/plan/generate").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/plan/validate")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "PLAN_REJECTED"
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "plan.rejected"
+    assert events[-1]["payload"]["code"] == "time_budget_exceeded"
+
+
+def test_plan_approval_rejects_a_plan_with_an_auditable_reason(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path, generated_web_scan_plan(), approval_policy="human_approval_required"
+    )
+    assert client.post(f"/audits/{created['id']}/plan/generate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/plan/validate").status_code == 200
+
+    response = client.post(
+        f"/audits/{created['id']}/plan/approval",
+        json={"decision": "reject", "reviewed_by": "security@example.test", "reason": "Maintenance window closed."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "PLAN_REJECTED"
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "plan.rejected"
+    assert events[-1]["payload"]["code"] == "human_rejected"
+
+
+def approve_generated_plan(client, audit_id: str) -> None:
+    assert client.post(f"/audits/{audit_id}/plan/generate").status_code == 200
+    assert client.post(f"/audits/{audit_id}/plan/validate").status_code == 200
+
+
+def test_scheduler_creates_a_ready_step_for_an_approved_plan(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    approve_generated_plan(client, created["id"])
+
+    response = client.post(f"/audits/{created['id']}/plan/schedule")
+
+    assert response.status_code == 200
+    audit = response.json()
+    assert audit["state"] == "PLAN_SCHEDULED"
+    assert audit["execution_schedule"]["steps"][0]["status"] == "READY"
+    assert audit["execution_schedule"]["steps"][0]["capability"] == "web.vulnerability_scan"
+    assert "plugin_id" not in audit["execution_schedule"]["steps"][0]
+    assert audit["execution_schedule"]["reserved_duration_seconds"] == 600
+    assert audit["execution_schedule"]["registry_snapshot_id"] == audit["audit_plan"]["registry_snapshot_id"]
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "plan.scheduled"
+
+
+def test_scheduler_holds_dependent_steps_pending(tmp_path) -> None:
+    dependent_plan = {
+        "steps": [
+            {
+                "id": "first",
+                "capability": "web.vulnerability_scan",
+                "depends_on": [],
+                "inputs": {},
+                "reason": "First approved scan.",
+            },
+            {
+                "id": "second",
+                "capability": "web.vulnerability_scan",
+                "depends_on": ["first"],
+                "inputs": {},
+                "reason": "Follow-up only after the first step completes.",
+            },
+        ]
+    }
+    client, created = prepared_plan_client(tmp_path, dependent_plan)
+    approve_generated_plan(client, created["id"])
+
+    response = client.post(f"/audits/{created['id']}/plan/schedule")
+
+    assert response.status_code == 200
+    steps = response.json()["execution_schedule"]["steps"]
+    assert [step["status"] for step in steps] == ["READY", "PENDING"]
+    assert response.json()["execution_schedule"]["reserved_duration_seconds"] == 1200
+
+
+def test_scheduler_is_approval_gated_and_idempotent(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    assert client.post(f"/audits/{created['id']}/plan/generate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 409
+    assert client.post(f"/audits/{created['id']}/plan/validate").status_code == 200
+
+    first = client.post(f"/audits/{created['id']}/plan/schedule")
+    second = client.post(f"/audits/{created['id']}/plan/schedule")
+
+    assert first.status_code == 200
+    assert first.json() == second.json()
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert [event["event_type"] for event in events].count("plan.scheduled") == 1
+
+
+def test_registry_refresh_is_authorized_and_atomically_updates_new_discoveries(tmp_path) -> None:
+    manifest_directory = tmp_path / "manifests"
+    manifest_directory.mkdir()
+    manifest_path = manifest_directory / "scanner.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "plugin_id": "custom-scanner",
+                "plugin_version": "1",
+                "kind": "mcp_security_server",
+                "adapter": "restricted_mcp",
+                "enabled": True,
+                "health": "declared_healthy",
+                "capabilities": [
+                    {
+                        "capability": "web.custom_scan",
+                        "contract_version": "1",
+                        "description": "Scan an authorized web application.",
+                        "target_types": ["web_application"],
+                        "required_operation": "web_scan",
+                        "required_inputs": ["target_profile", "scope_policy"],
+                        "estimated_duration_seconds": 120,
+                        "estimated_cost_usd": 0,
+                        "reliability": 0.7,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifest_directory),
+        registry_admin_token="test-admin-token",
+    )
+    client = TestClient(app)
+    assert client.post("/admin/plugins/refresh").status_code == 403
+    refreshed = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    )
+    assert refreshed.status_code == 200
+    first_snapshot_id = refreshed.json()["snapshot_id"]
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["enabled"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    second_refresh = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    )
+    assert second_refresh.status_code == 200
+    assert second_refresh.json()["snapshot_id"] != first_snapshot_id
+
+    created = client.post("/audits", json=valid_request()).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/profile").status_code == 200
+    discovery = client.post(f"/audits/{created['id']}/capabilities/discover").json()["capability_discovery"]
+    assert discovery["candidates"] == []
+    assert discovery["registry_snapshot_id"] == second_refresh.json()["snapshot_id"]
+
+
+def test_failed_registry_refresh_preserves_the_active_snapshot(tmp_path) -> None:
+    manifest_directory = tmp_path / "manifests"
+    manifest_directory.mkdir()
+    valid_manifest = {
+        "plugin_id": "custom-scanner",
+        "plugin_version": "1",
+        "enabled": True,
+        "health": "declared_healthy",
+        "capabilities": [
+            {
+                "capability": "web.custom_scan",
+                "description": "Scan an authorized web application.",
+                "target_types": ["web_application"],
+                "required_operation": "web_scan",
+                "required_inputs": ["target_profile", "scope_policy"],
+                "estimated_duration_seconds": 120,
+                "estimated_cost_usd": 0,
+                "reliability": 0.7,
+            }
+        ],
+    }
+    (manifest_directory / "first.json").write_text(json.dumps(valid_manifest), encoding="utf-8")
+    app = create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifest_directory),
+        registry_admin_token="test-admin-token",
+    )
+    client = TestClient(app)
+    active = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    ).json()
+    (manifest_directory / "duplicate.json").write_text(json.dumps(valid_manifest), encoding="utf-8")
+    failed = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    )
+    assert failed.status_code == 422
+    assert app.state.capability_registry.active_snapshot().snapshot_id == active["snapshot_id"]
+
+
+def test_planner_receives_sanitized_snapshot_capabilities(tmp_path) -> None:
+    gateway = FakeModelGateway(generated_web_scan_plan())
+    profiles_path = tmp_path / "model_profiles.json"
+    write_model_profiles(profiles_path)
+    app = create_app(str(tmp_path / "audits.db"), model_profiles_path=str(profiles_path))
+    app.state.audit_planner = AuditPlanner(gateway)
+    client = TestClient(app)
+    created = client.post("/audits", json=valid_request()).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/profile").status_code == 200
+    discovery = client.post(f"/audits/{created['id']}/capabilities/discover").json()["capability_discovery"]
+    assert client.post(f"/audits/{created['id']}/plan/generate").status_code == 200
+
+    assert discovery["registry_snapshot_id"] in gateway.user_prompt
+    assert "plugin_id" not in gateway.user_prompt
+    assert "plugin_version" not in gateway.user_prompt

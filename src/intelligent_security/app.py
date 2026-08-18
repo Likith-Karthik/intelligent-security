@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, status
 
-from .domain import Audit, AuditCreateRequest, AuditEvent, AuditState
+from .domain import Audit, AuditCreateRequest, AuditEvent, AuditState, PlanApprovalRequest, PlanValidationStatus
+from .policy.plan import PlanPolicyError, validate_plan
 from .policy.scope import ScopeValidationError, validate_scope
 from .planning.model_gateway import ModelGatewayError, OpenAICompatibleModelGateway
 from .planning.model_profiles import ModelProfileError, ModelProfileRegistry
@@ -13,17 +14,20 @@ from .planning.service import AuditPlanner, PlanningError
 from .profiling.service import TargetProfilingError, profile_target
 from .registry.service import CapabilityRegistry, RegistryError
 from .repository import AuditRepository
+from .scheduling.service import ScheduleError, schedule_plan
 
 
 def create_app(
     database_path: str = None,
     plugin_manifest_directory: str = None,
     model_profiles_path: str = None,
+    registry_admin_token: str = None,
 ) -> FastAPI:
     resolved_path = database_path or os.getenv("AUDIT_DATABASE_PATH", "data/audits.db")
     app = FastAPI(title="Intelligent Security Audit Orchestrator", version="0.1.0")
     app.state.audit_repository = AuditRepository(resolved_path)
     app.state.capability_registry = CapabilityRegistry(plugin_manifest_directory)
+    app.state.registry_admin_token = registry_admin_token or os.getenv("PLUGIN_REGISTRY_ADMIN_TOKEN")
     app.state.model_profile_registry = ModelProfileRegistry(model_profiles_path)
     app.state.audit_planner = AuditPlanner(OpenAICompatibleModelGateway())
 
@@ -44,6 +48,27 @@ def create_app(
         if audit is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
         return app.state.audit_repository.list_events(audit_id)
+
+    @app.post("/admin/plugins/refresh")
+    def refresh_plugin_registry(
+        x_plugin_registry_token: str = Header(default=None),
+    ) -> dict:
+        configured_token = app.state.registry_admin_token
+        if not configured_token:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "registry_refresh_not_configured", "message": "Registry refresh token is not configured."},
+            )
+        if x_plugin_registry_token != configured_token:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Registry refresh is not authorized")
+        try:
+            snapshot = app.state.capability_registry.refresh()
+        except RegistryError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "registry_admission_failed", "message": str(error)},
+            )
+        return snapshot.summary()
 
     @app.post("/audits/{audit_id}/scope/validate", response_model=Audit)
     def validate_audit_scope(audit_id: UUID) -> Audit:
@@ -150,6 +175,7 @@ def create_app(
                 "candidate_count": len(discovery.candidates),
                 "gap_count": len(discovery.gaps),
                 "registry_version": discovery.registry_version,
+                "registry_snapshot_id": discovery.registry_snapshot_id,
             },
         )
 
@@ -196,6 +222,118 @@ def create_app(
                 "model_profile_id": audit_plan.model_profile_id,
                 "step_count": len(audit_plan.steps),
                 "plan_version": audit_plan.plan_version,
+                "registry_snapshot_id": audit_plan.registry_snapshot_id,
+            },
+        )
+
+    @app.post("/audits/{audit_id}/plan/validate", response_model=Audit)
+    def validate_audit_plan(audit_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.state in {AuditState.PLAN_APPROVED, AuditState.PLAN_PENDING_APPROVAL}:
+            return audit
+        if audit.state != AuditState.PLAN_PROPOSED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Audit plan cannot be validated before it is proposed",
+            )
+        try:
+            validation = validate_plan(audit)
+        except PlanPolicyError as error:
+            audit.state = AuditState.PLAN_REJECTED
+            audit.plan_validated_at = datetime.now(timezone.utc)
+            return app.state.audit_repository.save_with_event(
+                audit,
+                "plan.rejected",
+                {"code": error.code, "message": error.message},
+            )
+
+        audit.plan_validation = validation
+        audit.plan_validated_at = validation.validated_at
+        if validation.status == PlanValidationStatus.PENDING_HUMAN_APPROVAL:
+            audit.state = AuditState.PLAN_PENDING_APPROVAL
+            return app.state.audit_repository.save_with_event(
+                audit,
+                "plan.approval_requested",
+                {
+                    "estimated_duration_seconds": validation.estimated_duration_seconds,
+                    "estimated_cost_usd": validation.estimated_cost_usd,
+                    "reasons": validation.reasons,
+                },
+            )
+        audit.state = AuditState.PLAN_APPROVED
+        audit.plan_approved_at = validation.validated_at
+        audit.plan_approved_by = "policy-engine"
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "plan.approved",
+            {
+                "approved_by": audit.plan_approved_by,
+                "approval_required": False,
+                "registry_snapshot_id": validation.registry_snapshot_id,
+            },
+        )
+
+    @app.post("/audits/{audit_id}/plan/approval", response_model=Audit)
+    def decide_audit_plan(audit_id: UUID, request: PlanApprovalRequest) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.state != AuditState.PLAN_PENDING_APPROVAL:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Audit plan is not awaiting human approval",
+            )
+        if request.decision == "reject":
+            audit.state = AuditState.PLAN_REJECTED
+            return app.state.audit_repository.save_with_event(
+                audit,
+                "plan.rejected",
+                {"code": "human_rejected", "reviewed_by": request.reviewed_by, "reason": request.reason},
+            )
+        audit.state = AuditState.PLAN_APPROVED
+        audit.plan_approved_at = datetime.now(timezone.utc)
+        audit.plan_approved_by = request.reviewed_by
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "plan.approved",
+            {"approved_by": request.reviewed_by, "approval_required": True, "reason": request.reason},
+        )
+
+    @app.post("/audits/{audit_id}/plan/schedule", response_model=Audit)
+    def schedule_audit_plan(audit_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.state == AuditState.PLAN_SCHEDULED and audit.execution_schedule is not None:
+            return audit
+        if audit.state != AuditState.PLAN_APPROVED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Audit plan cannot be scheduled before approval",
+            )
+        try:
+            execution_schedule = schedule_plan(audit)
+        except ScheduleError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": error.code, "message": error.message},
+            )
+        audit.execution_schedule = execution_schedule
+        audit.plan_scheduled_at = execution_schedule.scheduled_at
+        audit.state = AuditState.PLAN_SCHEDULED
+        ready_count = sum(step.status.value == "READY" for step in execution_schedule.steps)
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "plan.scheduled",
+            {
+                "step_count": len(execution_schedule.steps),
+                "ready_count": ready_count,
+                "pending_count": len(execution_schedule.steps) - ready_count,
+                "reserved_duration_seconds": execution_schedule.reserved_duration_seconds,
+                "reserved_cost_usd": execution_schedule.reserved_cost_usd,
+                "registry_snapshot_id": execution_schedule.registry_snapshot_id,
             },
         )
 
