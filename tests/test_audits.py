@@ -7,6 +7,9 @@ from intelligent_security.app import create_app
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfileRegistry
 from intelligent_security.execution.service import ExecutionService
 from intelligent_security.execution.adapters import ContainerCliAdapter
+from intelligent_security.evidence.artifact_store import ArtifactStore
+from intelligent_security.evidence.collector import EvidenceCollector
+from intelligent_security.evidence.normalizer import EvidenceNormalizer
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
 from intelligent_security.planning.service import AuditPlanner
 
@@ -267,23 +270,17 @@ def test_capability_discovery_matches_web_scan_to_nuclei(tmp_path) -> None:
     assert audit["state"] == "CAPABILITIES_DISCOVERED"
     discovery = audit["capability_discovery"]
     assert discovery["gaps"] == []
-    assert discovery["candidates"] == [
-        {
-                "rank": 1,
-                "capability": "web.vulnerability_scan",
-                "contract_version": "1",
-            "description": "Run template-based vulnerability scans against an authorized web application or API.",
-                "plugin_id": "nuclei",
-                "plugin_version": "1",
-                "adapter": "container_cli",
-            "required_operation": "web_scan",
-            "required_inputs": ["target_profile", "scope_policy"],
-            "estimated_duration_seconds": 600,
-            "estimated_cost_usd": 0.0,
-            "reliability": 0.85,
-            "health": "declared_healthy",
-        }
-    ]
+    scan = next(item for item in discovery["candidates"] if item["capability"] == "web.vulnerability_scan")
+    assert scan == {
+        "rank": 1, "capability": "web.vulnerability_scan", "contract_version": "1",
+        "description": "Run template-based vulnerability scans against an authorized web application or API.",
+        "plugin_id": "nuclei", "plugin_version": "1", "adapter": "container_cli",
+        "required_operation": "web_scan", "required_inputs": ["target_profile", "scope_policy"],
+        "estimated_duration_seconds": 600, "estimated_cost_usd": 0.0, "reliability": 0.85,
+        "health": "declared_healthy", "validation_for": [],
+    }
+    validation = next(item for item in discovery["candidates"] if item["capability"] == "web.vulnerability.validate")
+    assert validation["validation_for"] == ["web.vulnerability_scan"]
     events = client.get(f"/audits/{created['id']}/events").json()
     assert events[-1]["event_type"] == "capabilities.discovered"
 
@@ -911,7 +908,9 @@ def configure_fake_execution_runtime(app, tmp_path) -> None:
         encoding="utf-8",
     )
     app.state.execution_service = ExecutionService(
-        PluginRuntimeProfileRegistry(str(profiles_path)), {"container_cli": FakeExecutionAdapter()}
+        PluginRuntimeProfileRegistry(str(profiles_path)),
+        {"container_cli": FakeExecutionAdapter()},
+        EvidenceCollector(ArtifactStore(str(tmp_path / "evidence"))),
     )
 
 
@@ -931,6 +930,10 @@ def test_execution_late_binds_a_configured_plugin_and_records_result(tmp_path) -
     assert execution["plugin_id"] == "nuclei"
     assert execution["adapter"] == "container_cli"
     assert execution["output_summary"]["result"] == "safe-test-success"
+    assert execution["evidence_record_id"]
+    evidence = audit["raw_evidence"][-1]
+    assert evidence["execution_id"] == execution["execution_id"]
+    assert {artifact["kind"] for artifact in evidence["artifacts"]} == {"invocation", "stdout", "stderr"}
     events = client.get(f"/audits/{created['id']}/events").json()
     assert events[-1]["event_type"] == "step.completed"
 
@@ -977,7 +980,7 @@ def test_container_adapter_uses_an_admitted_package_execution_profile(tmp_path) 
     assert package is not None
     result = ContainerCliAdapter(runner).execute(runtime, audit, step, package)
 
-    assert result["finding_count"] == 1
+    assert result.output_summary["finding_count"] == 1
     assert "https://staging.example.test/" in received["command"]
     assert received["command"][received["command"].index("-ni") + 1] == "-dr"
     assert "-duc" in received["command"]
@@ -987,3 +990,137 @@ def test_container_adapter_uses_an_admitted_package_execution_profile(tmp_path) 
     assert received["command"][received["command"].index("-retries") + 1] == "0"
     assert "-fuzz" not in received["command"]
     assert "-dast" not in received["command"]
+
+
+def test_flow_9_captures_raw_failed_container_execution_with_redacted_invocation(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    approve_generated_plan(client, created["id"])
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+    profiles_path = tmp_path / "plugin_runtimes.json"
+    profiles_path.write_text(
+        json.dumps({"plugins": [{
+            "plugin_id": "nuclei", "adapter": "container_cli", "runtime_reference": "container-config://test-nuclei",
+            "image_reference": "projectdiscovery/nuclei@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb",
+            "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+        }]}),
+        encoding="utf-8",
+    )
+
+    def failing_runner(command, **kwargs):
+        return subprocess.CompletedProcess(command, 7, "partial raw output\n", "raw diagnostic\n")
+
+    client.app.state.execution_service = ExecutionService(
+        PluginRuntimeProfileRegistry(str(profiles_path)),
+        {"container_cli": ContainerCliAdapter(failing_runner)},
+        EvidenceCollector(ArtifactStore(str(tmp_path / "evidence"))),
+    )
+    response = client.post(f"/audits/{created['id']}/steps/scan-web-app/execute")
+
+    assert response.status_code == 200
+    audit = response.json()
+    execution = audit["plugin_executions"][-1]
+    evidence = audit["raw_evidence"][-1]
+    assert execution["status"] == "FAILED"
+    assert execution["evidence_record_id"] == evidence["evidence_id"]
+    assert evidence["exit_code"] == 7
+    assert evidence["container_image_digest"].endswith("582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb")
+    assert all(len(artifact["sha256"]) == 64 for artifact in evidence["artifacts"])
+    stdout = next(artifact for artifact in evidence["artifacts"] if artifact["kind"] == "stdout")
+    stored_path = tmp_path / "evidence" / stdout["storage_uri"].removeprefix("evidence://")
+    assert stored_path.read_text(encoding="utf-8") == "partial raw output\n"
+
+
+def test_flow_10_normalizes_package_output_into_common_observations(tmp_path) -> None:
+    client, created = prepared_plan_client(tmp_path, generated_web_scan_plan())
+    approve_generated_plan(client, created["id"])
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+    profiles_path = tmp_path / "plugin_runtimes.json"
+    profiles_path.write_text(
+        json.dumps({"plugins": [{
+            "plugin_id": "nuclei", "adapter": "container_cli", "runtime_reference": "container-config://test-nuclei",
+            "image_reference": "projectdiscovery/nuclei@sha256:582d5546902e67052097cb2d07296c642d50a1afc5e44623cb038845df9a32eb",
+            "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+        }]}),
+        encoding="utf-8",
+    )
+    output = json.dumps({
+        "template-id": "missing-csp", "type": "http", "host": "https://staging.example.test",
+        "matched-at": "https://staging.example.test/", "extra-tool-field": "preserved",
+        "info": {"name": "Content Security Policy missing", "description": "No CSP response header.",
+                 "severity": "medium", "classification": {"cwe-id": ["CWE-693"]}},
+    }) + "\n"
+
+    def runner(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    evidence_store = ArtifactStore(str(tmp_path / "evidence"))
+    client.app.state.execution_service = ExecutionService(
+        PluginRuntimeProfileRegistry(str(profiles_path)),
+        {"container_cli": ContainerCliAdapter(runner)}, EvidenceCollector(evidence_store),
+    )
+    client.app.state.evidence_normalizer = EvidenceNormalizer(evidence_store)
+    executed = client.post(f"/audits/{created['id']}/steps/scan-web-app/execute").json()
+    evidence_id = executed["raw_evidence"][-1]["evidence_id"]
+
+    normalized = client.post(f"/audits/{created['id']}/evidence/{evidence_id}/normalize")
+
+    assert normalized.status_code == 200
+    audit = normalized.json()
+    result = audit["observation_normalizations"][-1]
+    assert result["status"] == "SUCCEEDED"
+    assert result["accepted_count"] == 1
+    observation = audit["observations"][-1]
+    assert observation["schema_version"] == "observation/v1"
+    assert observation["category"] == "http"
+    assert observation["title"] == "Content Security Policy missing"
+    assert observation["identifiers"] == ["CWE-693"]
+    assert observation["evidence_id"] == evidence_id
+    assert observation["tool_metadata"]["extra-tool-field"] == "preserved"
+    listed = client.get(f"/audits/{created['id']}/observations")
+    assert listed.status_code == 200
+    assert listed.json() == [observation]
+
+    correlated = client.post(f"/audits/{created['id']}/findings/correlate")
+    assert correlated.status_code == 200
+    candidate = correlated.json()["candidate_findings"][-1]
+    assert candidate["state"] == "VALIDATION_PENDING"
+    assert candidate["observation_ids"] == [observation["observation_id"]]
+    assert candidate["evidence_ids"] == [evidence_id]
+    assert candidate["validation_proposal"]["capability"] == "web.vulnerability.validate"
+
+    missing_evidence = client.post(
+        f"/audits/{created['id']}/findings/{candidate['finding_id']}/validation",
+        json={"outcome": "CONFIRMED", "evidence_id": "00000000-0000-0000-0000-000000000000",
+              "validated_by": "policy-engine", "basis": "This must be rejected because the evidence is not linked."},
+    )
+    assert missing_evidence.status_code == 409
+
+    confirmed = client.post(
+        f"/audits/{created['id']}/findings/{candidate['finding_id']}/validation",
+        json={"outcome": "CONFIRMED", "evidence_id": evidence_id,
+              "validated_by": "policy-engine", "basis": "Recorded validation basis linked to immutable evidence."},
+    )
+    assert confirmed.status_code == 200
+    finding = confirmed.json()["candidate_findings"][-1]
+    assert finding["state"] == "CONFIRMED"
+    assert finding["validation_history"][-1]["evidence_id"] == evidence_id
+
+    events_before = client.get(f"/audits/{created['id']}/events").json()
+    executions_before = client.get(f"/audits/{created['id']}").json()["plugin_executions"]
+    json_report = client.get(f"/audits/{created['id']}/report.json")
+    markdown_report = client.get(f"/audits/{created['id']}/report.md")
+
+    assert json_report.status_code == 200
+    report = json_report.json()
+    assert report["report_version"] == "1"
+    assert report["executive_summary"]["confirmed_finding_count"] == 1
+    reported_finding = report["confirmed_findings"][0]
+    assert reported_finding["finding_id"] == finding["finding_id"]
+    assert reported_finding["evidence_references"][0]["evidence_id"] == evidence_id
+    assert "extra-tool-field" not in json_report.text
+    assert markdown_report.status_code == 200
+    assert markdown_report.headers["content-type"].startswith("text/markdown")
+    assert "## Confirmed findings" in markdown_report.text
+    assert evidence_id in markdown_report.text
+    assert client.get(f"/audits/{created['id']}/events").json() == events_before
+    assert client.get(f"/audits/{created['id']}").json()["plugin_executions"] == executions_before

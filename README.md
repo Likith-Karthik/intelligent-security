@@ -191,4 +191,15 @@ After a `PLAN_SCHEDULED` audit has a `READY` step and a matching adapter/runtime
 curl -X POST http://127.0.0.1:8000/audits/{audit_id}/steps/{step_id}/execute
 ```
 
-The resolver selects the best currently admitted package that matches the capability contract and has an enabled runtime profile. If none is configured, the endpoint returns `409` with `capability_unavailable`, records an auditable blocked execution, and invokes nothing. The core includes only a generic constrained container adapter: it accepts a digest-pinned image from the local runtime profile, renders policy-controlled typed inputs, and uses package-owned fixed arguments and read-only package-local mounts. Nuclei is merely the bundled example package; deleting its directory and refreshing removes it without changing core source code.
+The resolver selects the best currently admitted package that matches the capability contract and has an enabled runtime profile. If none is configured, the endpoint returns `409` with `capability_unavailable`, records an auditable blocked execution, and invokes nothing. The core includes only a generic constrained container adapter: it accepts a digest-pinned image from the local runtime profile, renders policy-controlled typed inputs, and uses package-owned fixed arguments and read-only package-local mounts. Every invoked execution is then captured as immutable Flow 9 evidence: redacted invocation plus checksummed stdout/stderr artifacts, with optional adapter-supplied files, HTTP records, or screenshots. Raw artifact bodies remain in the evidence store rather than the audit API. Nuclei is merely the bundled example package; deleting its directory and refreshing removes it without changing core source code.
+
+### Generate a report
+
+Reports are derived only from persisted audit state; they do not call the planner or execute a plugin. Use either format after findings have been correlated and validated:
+
+```bash
+curl -sS "http://127.0.0.1:8000/audits/{audit_id}/report.json"
+curl -sS "http://127.0.0.1:8000/audits/{audit_id}/report.md"
+```
+
+The output includes confirmed findings and inconclusive candidates with immutable evidence metadata references. It intentionally excludes raw artifact bodies and tool-specific raw observation fields.

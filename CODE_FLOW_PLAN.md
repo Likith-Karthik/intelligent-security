@@ -480,6 +480,18 @@ Persist immutable execution evidence before interpretation or normalization.
 - `evidence/artifact_store.py`
 - `domain/evidence.py`
 
+### POC implementation
+
+- Each plugin package may include a trusted declarative `normalizer.json`; the core currently supports JSONL-to-`observation/v1` mappings without importing arbitrary plugin code.
+- The normalizer reads and checksum-verifies the raw artifact, then records an immutable normalization result and linked observations. Invalid JSON lines or invalid mapped observations are rejected individually and recorded; their source evidence remains intact.
+- `POST /audits/{audit_id}/evidence/{evidence_id}/normalize` runs the admitted package mapping, and `GET /audits/{audit_id}/observations` exposes the common schema.
+
+### POC implementation
+
+- Adapters return a raw execution result alongside their safe summary; the generic container adapter captures the rendered invocation, stdout, stderr, exit code, and timeout details.
+- The collector writes append-only, checksummed artifacts under an audit- and evidence-specific path. The audit stores only immutable metadata, provenance, and artifact URIs; raw bodies are not returned by the API. Adapter contracts also admit optional raw artifacts (for example, HTTP records, files, or screenshots) without changing the core collector.
+- Evidence is captured for successful and failed invoked executions before a future normalizer can inspect tool output. A failure to resolve any permitted runtime remains an unexecuted capability gap, not evidence of a plugin invocation.
+
 ### Completion test
 
 Every completed execution has an immutable evidence record, including failed executions.
@@ -550,6 +562,12 @@ CANDIDATE
 - `findings/validator.py`
 - `findings/service.py`
 
+### POC implementation
+
+- `POST /audits/{audit_id}/findings/correlate` deterministically groups observations by category, asset, location, identifiers, and title. Each candidate preserves the source observation and immutable evidence IDs plus the correlation key.
+- A package capability can declare `validation_for` capability contracts. Correlation may propose one of these safe validation capabilities, but it is only a proposal: it must enter the normal plan/approval workflow before execution.
+- `POST /audits/{audit_id}/findings/{finding_id}/validation` records a validation outcome only with evidence already linked to that candidate. Correlation alone never confirms a finding.
+
 ### Completion test
 
 No candidate becomes `CONFIRMED` without linked evidence and a recorded validation basis.
@@ -584,6 +602,12 @@ Create reports from persisted audit state rather than directly from raw model ou
 - `reporting/generator.py`
 - `reporting/templates/*`
 - `api/reports.py`
+
+### POC implementation
+
+- `GET /audits/{audit_id}/report.json` returns a JSON integration report and `GET /audits/{audit_id}/report.md` renders its Markdown equivalent. Neither endpoint writes audit state, emits an event, invokes a model, or reruns a plugin.
+- Reports include only confirmed findings and inconclusive candidates; each rendered finding is checked against persisted raw evidence and contains metadata references rather than raw artifact content.
+- The report includes scope, persisted plan methodology, executed tool versions, limitations, and execution/approval event history.
 
 ### Completion test
 

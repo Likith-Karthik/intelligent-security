@@ -15,6 +15,8 @@ from intelligent_security.execution.runtime_profiles import (
     PluginRuntimeProfileRegistry,
     RuntimeProfileError,
 )
+from intelligent_security.execution.result import AdapterExecutionResult
+from intelligent_security.evidence.collector import EvidenceCollector
 from intelligent_security.registry.service import CapabilityRegistry, PluginPackage, RegistryError
 
 
@@ -26,16 +28,17 @@ class ExecutionError(Exception):
 
 
 class PluginAdapter(Protocol):
-    def execute(self, runtime: PluginRuntimeProfile, audit: Audit, step: ScheduledStep, package: PluginPackage) -> dict:
-        """Execute a policy-controlled step and return summary metadata only."""
+    def execute(self, runtime: PluginRuntimeProfile, audit: Audit, step: ScheduledStep, package: PluginPackage) -> AdapterExecutionResult:
+        """Execute a policy-controlled step and return raw output for evidence capture."""
 
 
 class ExecutionService:
     """Late-bind a scheduled capability to an operator-configured plugin runtime."""
 
-    def __init__(self, runtime_profiles: PluginRuntimeProfileRegistry, adapters: Dict[str, PluginAdapter] = None) -> None:
+    def __init__(self, runtime_profiles: PluginRuntimeProfileRegistry, adapters: Dict[str, PluginAdapter] = None, evidence_collector: EvidenceCollector = None) -> None:
         self.runtime_profiles = runtime_profiles
         self.adapters = adapters or {}
+        self.evidence_collector = evidence_collector
 
     def execute(self, audit: Audit, step: ScheduledStep, registry: CapabilityRegistry) -> PluginExecution:
         if step.status != ScheduledStepStatus.READY:
@@ -60,10 +63,17 @@ class ExecutionService:
 
         step.status = ScheduledStepStatus.RUNNING
         try:
-            output_summary = adapter.execute(runtime, audit, step, package)
+            result = adapter.execute(runtime, audit, step, package)
         except Exception as error:
             step.status = ScheduledStepStatus.FAILED
-            return PluginExecution(
+            result = AdapterExecutionResult(error_code="adapter_execution_failed", error_message=str(error))
+        if isinstance(result, dict):
+            # Compatibility for simple custom adapters during the POC migration.
+            result = AdapterExecutionResult(output_summary=result)
+
+        if result.error_code or result.exit_code not in (None, 0):
+            step.status = ScheduledStepStatus.FAILED
+            execution = PluginExecution(
                 plan_step_id=step.plan_step_id,
                 capability=step.capability,
                 contract_version=step.contract_version,
@@ -74,24 +84,30 @@ class ExecutionService:
                 status=PluginExecutionStatus.FAILED,
                 started_at=started_at,
                 completed_at=datetime.now(timezone.utc),
-                error_code="adapter_execution_failed",
-                error_message=str(error),
+                output_summary=result.output_summary,
+                error_code=result.error_code or "adapter_nonzero_exit",
+                error_message=result.error_message or "Plugin adapter returned a non-zero exit status.",
             )
-
-        step.status = ScheduledStepStatus.SUCCEEDED
-        return PluginExecution(
-            plan_step_id=step.plan_step_id,
-            capability=step.capability,
-            contract_version=step.contract_version,
-            plugin_id=candidate.plugin_id,
-            plugin_version=candidate.plugin_version,
-            adapter=runtime.adapter,
-            registry_snapshot_id=current_discovery.registry_snapshot_id,
-            status=PluginExecutionStatus.SUCCEEDED,
-            started_at=started_at,
-            completed_at=datetime.now(timezone.utc),
-            output_summary=output_summary,
-        )
+        else:
+            step.status = ScheduledStepStatus.SUCCEEDED
+            execution = PluginExecution(
+                plan_step_id=step.plan_step_id,
+                capability=step.capability,
+                contract_version=step.contract_version,
+                plugin_id=candidate.plugin_id,
+                plugin_version=candidate.plugin_version,
+                adapter=runtime.adapter,
+                registry_snapshot_id=current_discovery.registry_snapshot_id,
+                status=PluginExecutionStatus.SUCCEEDED,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+                output_summary=result.output_summary,
+            )
+        if self.evidence_collector is not None:
+            evidence = self.evidence_collector.capture(audit, execution, result, runtime.image_reference)
+            audit.raw_evidence.append(evidence)
+            execution.evidence_record_id = evidence.evidence_id
+        return execution
 
     @staticmethod
     def _resolve(

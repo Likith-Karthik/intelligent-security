@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from intelligent_security.domain import Audit, ScheduledStep
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
+from intelligent_security.execution.result import AdapterExecutionResult
 from intelligent_security.registry.service import PluginPackage
 
 
@@ -17,7 +18,7 @@ class ContainerCliAdapter:
 
     def execute(
         self, runtime: PluginRuntimeProfile, audit: Audit, step: ScheduledStep, package: PluginPackage
-    ) -> dict:
+    ) -> AdapterExecutionResult:
         if runtime.image_reference is None:
             raise RuntimeError("Container execution requires an approved image reference.")
         target = self._authorized_target(audit, runtime)
@@ -31,16 +32,35 @@ class ContainerCliAdapter:
         command.extend(self._mount_arguments(package.root, execution.mounts))
         command.append(runtime.image_reference)
         command.extend(self._render_arguments(execution.arguments, target))
-        completed = self.command_runner(
-            command, check=False, capture_output=True, text=True, timeout=runtime.max_runtime_seconds
+        try:
+            completed = self.command_runner(
+                command, check=False, capture_output=True, text=True, timeout=runtime.max_runtime_seconds
+            )
+        except subprocess.TimeoutExpired as error:
+            return AdapterExecutionResult(
+                invocation=command,
+                stdout=self._as_text(error.stdout),
+                stderr=self._as_text(error.stderr),
+                error_code="adapter_timeout",
+                error_message="Container command exceeded its approved runtime limit.",
+            )
+        return AdapterExecutionResult(
+            output_summary={
+                "finding_count": self._count_output_records(completed.stdout, execution.output_format),
+                "exit_code": completed.returncode,
+                "output_format": execution.output_format,
+            },
+            invocation=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+            error_code="adapter_nonzero_exit" if completed.returncode != 0 else None,
+            error_message="Container command exited with code {}.".format(completed.returncode) if completed.returncode != 0 else None,
         )
-        if completed.returncode != 0:
-            raise RuntimeError("Container command exited with code {}: {}".format(completed.returncode, completed.stderr[-1000:]))
-        return {
-            "finding_count": self._count_output_records(completed.stdout, execution.output_format),
-            "exit_code": completed.returncode,
-            "output_format": execution.output_format,
-        }
+
+    @staticmethod
+    def _as_text(value) -> str:
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
 
     @staticmethod
     def _mount_arguments(package_root: Path, mounts: list) -> list:

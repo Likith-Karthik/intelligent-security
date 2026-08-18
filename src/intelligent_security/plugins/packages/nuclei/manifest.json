@@ -15,6 +15,17 @@
       "estimated_duration_seconds": 600,
       "estimated_cost_usd": 0,
       "reliability": 0.85
+    },
+    {
+      "capability": "web.vulnerability.validate",
+      "description": "Safely re-check an existing template-based web observation within approved scope.",
+      "target_types": ["web_application", "api"],
+      "required_operation": "web_scan",
+      "required_inputs": ["target_profile", "scope_policy"],
+      "estimated_duration_seconds": 600,
+      "estimated_cost_usd": 0,
+      "reliability": 0.85,
+      "validation_for": ["web.vulnerability_scan"]
     }
   ]
 }

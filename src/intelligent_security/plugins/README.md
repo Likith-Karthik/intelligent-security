@@ -4,7 +4,7 @@ Plugins extend the audit platform by advertising security capabilities. The plan
 
 ## Core concepts
 
-- **Plugin package**: one removable directory under `plugins/packages/<plugin-id>/`. It contains a public `manifest.json`, and may contain a trusted `execution.json` plus templates or normalizers.
+- **Plugin package**: one removable directory under `plugins/packages/<plugin-id>/`. It contains a public `manifest.json`, and may contain a trusted `execution.json`, `normalizer.json`, plus templates or other package assets.
 - **Capability**: a stable action the platform can plan, such as `source.static_analysis`, `web.vulnerability_scan`, or `llm.prompt_injection_test`.
 - **Adapter**: trusted core support for invoking a plugin. Supported manifest values are `native`, `container_cli`, `rest`, `restricted_mcp`, and `llm_testing`.
 - **Registry snapshot**: the validated, immutable list of active plugin manifests. New discoveries and plans use the current snapshot after an operator refresh.
@@ -18,6 +18,41 @@ Adding a plugin that uses an existing adapter is manifest/configuration work. Ad
 3. Use a unique `plugin_id` and declare one or more versioned capabilities.
 4. Do not place API keys, passwords, shell commands, arbitrary executable paths, or raw MCP instructions in the manifest.
 5. For an executable package, add a package-owned `execution.json` for an existing adapter and a matching operator-managed runtime profile in `config/plugin_runtimes.json`.
+6. To expose tool results to later finding workflows, add a declarative `normalizer.json`. It maps the package's stored JSONL artifact to the common `observation/v1` schema; do not add plugin-specific parsing logic to the core service.
+
+## Package normalizer specification
+
+`normalizer.json` is admitted with the package and is never provided to the planner. The POC supports JSONL input and dotted paths into each JSON object. `category` and `title` are required mappings; all other common fields are optional. The complete original JSON object is retained as `tool_metadata` so unknown tool fields are not lost.
+
+```json
+{
+  "input_artifact_kind": "stdout",
+  "input_format": "jsonl",
+  "fields": {
+    "category": {"path": "type", "default": "vulnerability"},
+    "title": {"path": "info.name", "default": "Tool observation"},
+    "affected_asset": {"path": "host"},
+    "severity_reported": {"path": "info.severity"},
+    "confidence": {"default": 0.7}
+  }
+}
+```
+
+Run `POST /audits/{audit_id}/evidence/{evidence_id}/normalize` after Flow 9 capture. A malformed line is rejected and recorded in the normalization result, but its immutable raw artifact is retained. Query common observations with `GET /audits/{audit_id}/observations`.
+
+## Validation capabilities
+
+A capability may declare `validation_for` with the capability contracts it can safely re-check. This lets Flow 11 propose a compatible validation capability after correlation without embedding a plugin name in the finding logic:
+
+```json
+{
+  "capability": "web.vulnerability.validate",
+  "validation_for": ["web.vulnerability_scan"],
+  "required_operation": "web_scan"
+}
+```
+
+The proposal is not an invocation. It must become a separately approved plan step before Flow 8 can execute it.
 6. Refresh the registry with an authorized operator token.
 7. Create a new audit and run capability discovery to confirm the capability is available.
 

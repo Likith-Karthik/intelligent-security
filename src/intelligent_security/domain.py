@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -115,6 +115,7 @@ class PluginCapability(BaseModel):
     reliability: float = Field(..., ge=0, le=1)
     input_schema: str = Field(default="policy-controlled/v1", min_length=1, max_length=200)
     output_schema: str = Field(default="finding-batch/v1", min_length=1, max_length=200)
+    validation_for: List[str] = Field(default_factory=list, max_length=50)
 
 
 class PluginManifest(BaseModel):
@@ -148,6 +149,23 @@ class PluginExecutionSpec(BaseModel):
     output_format: str = Field(default="jsonl", pattern=r"^(jsonl|text)$")
 
 
+class NormalizerField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: Optional[str] = Field(default=None, max_length=500)
+    default: Optional[Any] = None
+
+
+class PluginNormalizerSpec(BaseModel):
+    """Trusted declarative mapping from a package's JSONL output to observation/v1."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_artifact_kind: str = Field(default="stdout", pattern=r"^[a-z0-9_-]+$")
+    input_format: str = Field(default="jsonl", pattern=r"^jsonl$")
+    fields: Dict[str, NormalizerField] = Field(..., min_length=1, max_length=30)
+
+
 class CapabilityCandidate(BaseModel):
     rank: int
     capability: str
@@ -162,6 +180,7 @@ class CapabilityCandidate(BaseModel):
     estimated_cost_usd: float
     reliability: float
     health: PluginHealth
+    validation_for: List[str] = Field(default_factory=list)
 
 
 class CapabilityGap(BaseModel):
@@ -288,6 +307,143 @@ class PluginExecutionStatus(str, Enum):
     CAPABILITY_UNAVAILABLE = "CAPABILITY_UNAVAILABLE"
 
 
+class EvidenceArtifact(BaseModel):
+    """Metadata for a raw evidence artifact; the artifact body is never embedded in an audit."""
+
+    model_config = ConfigDict(frozen=True)
+
+    artifact_id: UUID = Field(default_factory=uuid4)
+    kind: str = Field(..., min_length=1, max_length=100)
+    content_type: str = Field(..., min_length=1, max_length=200)
+    storage_uri: str = Field(..., min_length=1, max_length=2048)
+    byte_size: int = Field(..., ge=0)
+    sha256: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+
+
+class RawEvidenceRecord(BaseModel):
+    """Immutable provenance and artifact index captured before output normalization."""
+
+    model_config = ConfigDict(frozen=True)
+
+    evidence_id: UUID = Field(default_factory=uuid4)
+    execution_id: UUID
+    audit_id: UUID
+    plan_step_id: str
+    target_identifier: str
+    plugin_id: Optional[str] = None
+    plugin_version: Optional[str] = None
+    container_image_digest: Optional[str] = None
+    redacted_invocation: List[str] = Field(default_factory=list)
+    started_at: datetime
+    completed_at: datetime
+    exit_code: Optional[int] = None
+    artifacts: List[EvidenceArtifact] = Field(default_factory=list)
+
+
+class ObservationNormalizationStatus(str, Enum):
+    SUCCEEDED = "SUCCEEDED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+
+
+class Observation(BaseModel):
+    """Versioned, plugin-neutral representation of one tool-reported observation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    observation_id: UUID = Field(default_factory=uuid4)
+    schema_version: str = "observation/v1"
+    audit_id: UUID
+    execution_id: UUID
+    evidence_id: UUID
+    category: str = Field(..., min_length=1, max_length=200)
+    title: str = Field(..., min_length=1, max_length=1000)
+    description: Optional[str] = Field(default=None, max_length=10000)
+    affected_asset: Optional[str] = Field(default=None, max_length=2048)
+    location: Optional[str] = Field(default=None, max_length=4096)
+    severity_reported: Optional[str] = Field(default=None, max_length=100)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    identifiers: List[str] = Field(default_factory=list, max_length=100)
+    evidence_artifact_ids: List[UUID] = Field(default_factory=list, min_length=1, max_length=100)
+    tool_metadata: dict = Field(default_factory=dict)
+
+
+class ObservationNormalization(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    normalization_id: UUID = Field(default_factory=uuid4)
+    evidence_id: UUID
+    execution_id: UUID
+    plugin_id: Optional[str] = None
+    plugin_version: Optional[str] = None
+    status: ObservationNormalizationStatus
+    normalized_at: datetime
+    accepted_count: int = Field(..., ge=0)
+    rejected_count: int = Field(..., ge=0)
+    errors: List[str] = Field(default_factory=list, max_length=100)
+
+
+class FindingState(str, Enum):
+    CANDIDATE = "CANDIDATE"
+    VALIDATION_PENDING = "VALIDATION_PENDING"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    RETEST_PENDING = "RETEST_PENDING"
+    FIXED = "FIXED"
+    STILL_PRESENT = "STILL_PRESENT"
+
+
+class FindingValidationOutcome(str, Enum):
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class FindingValidationProposal(BaseModel):
+    capability: str
+    contract_version: str
+    reason: str
+    requires_normal_plan_approval: bool = True
+
+
+class FindingValidationBasis(BaseModel):
+    validation_id: UUID = Field(default_factory=uuid4)
+    outcome: FindingValidationOutcome
+    evidence_id: UUID
+    validated_by: str = Field(..., min_length=3, max_length=200)
+    basis: str = Field(..., min_length=3, max_length=4000)
+    recorded_at: datetime
+
+
+class FindingValidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: FindingValidationOutcome
+    evidence_id: UUID
+    validated_by: str = Field(..., min_length=3, max_length=200)
+    basis: str = Field(..., min_length=3, max_length=4000)
+
+
+class CandidateFinding(BaseModel):
+    finding_id: UUID = Field(default_factory=uuid4)
+    state: FindingState = FindingState.CANDIDATE
+    correlation_key: str = Field(..., min_length=1, max_length=500)
+    category: str = Field(..., min_length=1, max_length=200)
+    title: str = Field(..., min_length=1, max_length=1000)
+    affected_asset: Optional[str] = Field(default=None, max_length=2048)
+    location: Optional[str] = Field(default=None, max_length=4096)
+    severity_reported: Optional[str] = Field(default=None, max_length=100)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    observation_ids: List[UUID] = Field(..., min_length=1, max_length=1000)
+    evidence_ids: List[UUID] = Field(..., min_length=1, max_length=1000)
+    source_capabilities: List[str] = Field(default_factory=list)
+    validation_proposal: Optional[FindingValidationProposal] = None
+    validation_history: List[FindingValidationBasis] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
 class PluginExecution(BaseModel):
     execution_id: UUID = Field(default_factory=uuid4)
     plan_step_id: str
@@ -301,6 +457,7 @@ class PluginExecution(BaseModel):
     started_at: datetime
     completed_at: datetime
     output_summary: dict = Field(default_factory=dict)
+    evidence_record_id: Optional[UUID] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
 
@@ -350,6 +507,10 @@ class Audit(BaseModel):
     execution_schedule: Optional[ExecutionSchedule] = None
     plan_scheduled_at: Optional[datetime] = None
     plugin_executions: List[PluginExecution] = Field(default_factory=list)
+    raw_evidence: List[RawEvidenceRecord] = Field(default_factory=list)
+    observations: List[Observation] = Field(default_factory=list)
+    observation_normalizations: List[ObservationNormalization] = Field(default_factory=list)
+    candidate_findings: List[CandidateFinding] = Field(default_factory=list)
 
 
 class AuditEvent(BaseModel):

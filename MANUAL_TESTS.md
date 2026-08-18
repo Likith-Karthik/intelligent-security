@@ -303,3 +303,44 @@ Expected: the scheduled step transitions to `SUCCEEDED` or `FAILED`; a plugin ex
 Configure an enabled runtime profile for the bundled Nuclei package with an image digest and a single `allowed_target_hosts` value that matches an explicitly authorized HTTPS audit target. Execute the ready step.
 
 Expected: only that exact hostname can resolve the runtime. The generic container adapter runs the package-owned one-GET Content-Security-Policy header template with no redirects, OAST, retries, or fuzzing; its execution summary records the finding count but not raw responses.
+
+### 29. Verify raw evidence capture
+
+Execute an approved scheduled step, then retrieve the audit:
+
+```bash
+curl -sS "http://127.0.0.1:8000/audits/$AUDIT_ID"
+```
+
+Expected: the last `plugin_executions` item has `evidence_record_id`, and `raw_evidence` contains the matching immutable record. It includes the plugin/version, target, timing, image digest where applicable, redacted invocation, exit code, and checksummed `invocation`, `stdout`, and `stderr` artifact metadata. Raw artifact bodies remain on the configured evidence store and are not included in this response.
+
+### 30. Normalize captured observations
+
+Use the evidence ID returned by Flow 9:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/audits/$AUDIT_ID/evidence/$EVIDENCE_ID/normalize"
+curl -sS "http://127.0.0.1:8000/audits/$AUDIT_ID/observations"
+```
+
+Expected: a package-owned declared normalizer creates `observation/v1` records linked to the raw evidence. Tool-specific fields remain in `tool_metadata`. Malformed lines are counted in the normalization result while the original evidence artifacts remain unchanged.
+
+### 31. Correlate and validate candidate findings
+
+```bash
+curl -X POST "http://127.0.0.1:8000/audits/$AUDIT_ID/findings/correlate"
+curl -X POST "http://127.0.0.1:8000/audits/$AUDIT_ID/findings/$FINDING_ID/validation" \
+  -H 'Content-Type: application/json' \
+  -d '{"outcome":"INCONCLUSIVE","evidence_id":"'$EVIDENCE_ID'","validated_by":"reviewer@example.test","basis":"Validation record linked to captured evidence."}'
+```
+
+Expected: correlation creates evidence-linked candidates, optionally with a safe validation-capability proposal. Candidates stay `CANDIDATE` or `VALIDATION_PENDING`; they cannot become `CONFIRMED` until a validation outcome with candidate-linked evidence and a recorded basis is submitted. A validation capability proposal never executes a tool by itself.
+
+### 32. Generate reports without rerunning the audit
+
+```bash
+curl -sS "http://127.0.0.1:8000/audits/$AUDIT_ID/report.json"
+curl -sS "http://127.0.0.1:8000/audits/$AUDIT_ID/report.md"
+```
+
+Expected: JSON and Markdown reports include persisted scope, methodology, tools, confirmed findings, inconclusive candidates, evidence metadata references, limitations, and event history. Raw artifact bodies are not embedded. Repeating either request creates no execution and no new audit event.

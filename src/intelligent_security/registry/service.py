@@ -11,6 +11,7 @@ from intelligent_security.domain import (
     CapabilityGap,
     PluginHealth,
     PluginExecutionSpec,
+    PluginNormalizerSpec,
     PluginManifest,
 )
 
@@ -22,10 +23,11 @@ class RegistryError(Exception):
 class PluginPackage:
     """An admitted plugin package; execution details remain internal to the registry."""
 
-    def __init__(self, manifest: PluginManifest, root: Path, execution: Optional[PluginExecutionSpec]) -> None:
+    def __init__(self, manifest: PluginManifest, root: Path, execution: Optional[PluginExecutionSpec], normalizer: Optional[PluginNormalizerSpec]) -> None:
         self.manifest = manifest
         self.root = root
         self.execution = execution
+        self.normalizer = normalizer
 
 
 class RegistrySnapshot:
@@ -83,7 +85,12 @@ class CapabilityRegistry:
                     if execution.adapter != manifest.adapter:
                         raise RegistryError("Execution adapter must match manifest adapter.")
                     self._validate_execution_mounts(path.parent, execution)
-                packages.append(PluginPackage(manifest, path.parent, execution))
+                normalizer_path = path.parent / "normalizer.json"
+                normalizer = None
+                if normalizer_path.exists():
+                    with normalizer_path.open(encoding="utf-8") as normalizer_file:
+                        normalizer = PluginNormalizerSpec.model_validate(json.load(normalizer_file))
+                packages.append(PluginPackage(manifest, path.parent, execution, normalizer))
             except (OSError, ValueError) as error:
                 raise RegistryError("Unable to load plugin manifest {}: {}".format(path.name, error))
         return packages
@@ -109,6 +116,7 @@ class CapabilityRegistry:
                 {
                     "manifest": package.manifest.model_dump(mode="json"),
                     "execution": package.execution.model_dump(mode="json") if package.execution else None,
+                    "normalizer": package.normalizer.model_dump(mode="json") if package.normalizer else None,
                 }
                 for package in packages
             ],
@@ -161,6 +169,7 @@ class CapabilityRegistry:
                         estimated_cost_usd=capability.estimated_cost_usd,
                         reliability=capability.reliability,
                         health=manifest.health,
+                        validation_for=capability.validation_for,
                     )
                 )
 

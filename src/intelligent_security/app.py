@@ -4,6 +4,7 @@ from typing import List
 from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, status
+from fastapi.responses import PlainTextResponse
 
 from .domain import (
     Audit,
@@ -12,6 +13,7 @@ from .domain import (
     AuditState,
     PlanApprovalRequest,
     PlanValidationStatus,
+    FindingValidationRequest,
     PluginExecution,
     PluginExecutionStatus,
     ScheduledStepStatus,
@@ -19,6 +21,12 @@ from .domain import (
 from .execution.runtime_profiles import PluginRuntimeProfileRegistry
 from .execution.adapters import ContainerCliAdapter
 from .execution.service import ExecutionError, ExecutionService
+from .evidence.artifact_store import ArtifactStore
+from .evidence.collector import EvidenceCollector
+from .evidence.normalizer import EvidenceNormalizer
+from .findings.correlator import FindingCorrelator
+from .findings.service import FindingService, FindingServiceError
+from .reporting.generator import ReportGenerationError, ReportGenerator
 from .policy.plan import PlanPolicyError, validate_plan
 from .policy.scope import ScopeValidationError, validate_scope
 from .planning.model_gateway import ModelGatewayError, OpenAICompatibleModelGateway
@@ -36,6 +44,7 @@ def create_app(
     model_profiles_path: str = None,
     registry_admin_token: str = None,
     plugin_runtime_profiles_path: str = None,
+    evidence_directory: str = None,
 ) -> FastAPI:
     resolved_path = database_path or os.getenv("AUDIT_DATABASE_PATH", "data/audits.db")
     app = FastAPI(title="Intelligent Security Audit Orchestrator", version="0.1.0")
@@ -44,10 +53,16 @@ def create_app(
     app.state.registry_admin_token = registry_admin_token or os.getenv("PLUGIN_REGISTRY_ADMIN_TOKEN")
     app.state.model_profile_registry = ModelProfileRegistry(model_profiles_path)
     app.state.audit_planner = AuditPlanner(OpenAICompatibleModelGateway())
+    app.state.evidence_store = ArtifactStore(evidence_directory or os.getenv("EVIDENCE_DIRECTORY", "data/evidence"))
     app.state.execution_service = ExecutionService(
         PluginRuntimeProfileRegistry(plugin_runtime_profiles_path),
         {"container_cli": ContainerCliAdapter()},
+        EvidenceCollector(app.state.evidence_store),
     )
+    app.state.evidence_normalizer = EvidenceNormalizer(app.state.evidence_store)
+    app.state.finding_correlator = FindingCorrelator()
+    app.state.finding_service = FindingService()
+    app.state.report_generator = ReportGenerator()
 
     @app.post("/audits", response_model=Audit, status_code=status.HTTP_201_CREATED)
     def create_audit(request: AuditCreateRequest) -> Audit:
@@ -126,6 +141,104 @@ def create_app(
             "scope.validated",
             {"authorization_id": scope_policy.authorization_id},
         )
+
+    @app.post("/audits/{audit_id}/evidence/{evidence_id}/normalize", response_model=Audit)
+    def normalize_evidence(audit_id: UUID, evidence_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        evidence = next((item for item in audit.raw_evidence if item.evidence_id == evidence_id), None)
+        if evidence is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evidence record not found")
+        prior = next(
+            (item for item in audit.observation_normalizations if item.evidence_id == evidence_id and item.status.value == "SUCCEEDED"),
+            None,
+        )
+        if prior is not None:
+            return audit
+        package = app.state.capability_registry.active_snapshot().package_for_plugin(evidence.plugin_id or "")
+        normalization, observations = app.state.evidence_normalizer.normalize(audit, evidence, package)
+        audit.observation_normalizations.append(normalization)
+        audit.observations.extend(observations)
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "evidence.normalized" if normalization.status.value != "FAILED" else "evidence.normalization_failed",
+            {
+                "evidence_id": str(evidence.evidence_id),
+                "normalization_id": str(normalization.normalization_id),
+                "status": normalization.status.value,
+                "accepted_count": normalization.accepted_count,
+                "rejected_count": normalization.rejected_count,
+            },
+        )
+
+    @app.get("/audits/{audit_id}/observations", response_model=List[dict])
+    def list_observations(audit_id: UUID) -> List[dict]:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        return [observation.model_dump(mode="json") for observation in audit.observations]
+
+    @app.post("/audits/{audit_id}/findings/correlate", response_model=Audit)
+    def correlate_findings(audit_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.candidate_findings:
+            return audit
+        audit.candidate_findings = app.state.finding_correlator.correlate(audit)
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "findings.correlated",
+            {
+                "candidate_count": len(audit.candidate_findings),
+                "validation_pending_count": sum(item.state.value == "VALIDATION_PENDING" for item in audit.candidate_findings),
+            },
+        )
+
+    @app.post("/audits/{audit_id}/findings/{finding_id}/validation", response_model=Audit)
+    def record_finding_validation(
+        audit_id: UUID, finding_id: UUID, request: FindingValidationRequest
+    ) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        finding = next((item for item in audit.candidate_findings if item.finding_id == finding_id), None)
+        if finding is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate finding not found")
+        try:
+            app.state.finding_service.record_validation(audit, finding, request)
+        except FindingServiceError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "validation_rejected", "message": str(error)})
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "finding.validation_recorded",
+            {
+                "finding_id": str(finding.finding_id), "state": finding.state.value,
+                "validation_evidence_id": str(request.evidence_id),
+            },
+        )
+
+    @app.get("/audits/{audit_id}/report.json")
+    def generate_json_report(audit_id: UUID) -> dict:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        try:
+            return app.state.report_generator.generate_json(audit, app.state.audit_repository.list_events(audit_id))
+        except ReportGenerationError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "report_evidence_missing", "message": str(error)})
+
+    @app.get("/audits/{audit_id}/report.md", response_class=PlainTextResponse)
+    def generate_markdown_report(audit_id: UUID) -> PlainTextResponse:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        try:
+            report = app.state.report_generator.generate_json(audit, app.state.audit_repository.list_events(audit_id))
+            return PlainTextResponse(app.state.report_generator.generate_markdown(report), media_type="text/markdown")
+        except ReportGenerationError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "report_evidence_missing", "message": str(error)})
 
     @app.post("/audits/{audit_id}/profile", response_model=Audit)
     def profile_audit_target(audit_id: UUID) -> Audit:
@@ -413,6 +526,7 @@ def create_app(
                 "plugin_version": execution.plugin_version,
                 "adapter": execution.adapter.value if execution.adapter else None,
                 "status": execution.status.value,
+                "evidence_record_id": str(execution.evidence_record_id) if execution.evidence_record_id else None,
             },
         )
 
