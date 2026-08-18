@@ -306,7 +306,7 @@ Ask the model to create an explainable, typed DAG using only available capabilit
 1. Capture the active registry snapshot ID and build a bounded planner request from its sanitized capabilities.
 2. Call the model through a provider-neutral gateway.
 3. Parse structured output.
-4. Validate the JSON schema.
+4. Validate the JSON schema. The planner prompt requires each `depends_on` value to be an exact string step ID (never a numeric ordinal); harmless integer IDs and dependencies from compatible local models are canonicalized to strings before validation.
 5. Reject cycles and unknown capabilities.
 6. Save the proposed plan and rationale.
 

@@ -632,6 +632,35 @@ def test_plan_generation_normalizes_numeric_step_ids(tmp_path) -> None:
     assert response.json()["audit_plan"]["steps"][0]["id"] == "1"
 
 
+def test_plan_generation_normalizes_numeric_dependency_ids(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": 1,
+                    "capability": "web.vulnerability_scan",
+                    "depends_on": [],
+                    "inputs": {},
+                    "reason": "Run the initial authorized scan.",
+                },
+                {
+                    "id": 2,
+                    "capability": "web.vulnerability.validate",
+                    "depends_on": [1],
+                    "inputs": {},
+                    "reason": "Validate observations produced by the scan.",
+                },
+            ]
+        },
+    )
+
+    response = client.post(f"/audits/{created['id']}/plan/generate")
+
+    assert response.status_code == 200
+    assert response.json()["audit_plan"]["steps"][1]["depends_on"] == ["1"]
+
+
 def generated_web_scan_plan() -> dict:
     return {
         "steps": [
@@ -955,6 +984,40 @@ def test_execution_late_binds_a_configured_plugin_and_records_result(tmp_path) -
     assert {artifact["kind"] for artifact in evidence["artifacts"]} == {"invocation", "stdout", "stderr"}
     events = client.get(f"/audits/{created['id']}/events").json()
     assert events[-1]["event_type"] == "step.completed"
+
+
+def test_execution_promotes_satisfied_dependent_steps(tmp_path) -> None:
+    client, created = prepared_plan_client(
+        tmp_path,
+        {
+            "steps": [
+                {
+                    "id": "scan-web-app",
+                    "capability": "web.vulnerability_scan",
+                    "depends_on": [],
+                    "inputs": {},
+                    "reason": "Discover observations first.",
+                },
+                {
+                    "id": "validate-web-findings",
+                    "capability": "web.vulnerability.validate",
+                    "depends_on": ["scan-web-app"],
+                    "inputs": {},
+                    "reason": "Validate observations after discovery.",
+                },
+            ]
+        },
+    )
+    configure_fake_execution_runtime(client.app, tmp_path)
+    approve_generated_plan(client, created["id"])
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/steps/scan-web-app/execute")
+
+    assert response.status_code == 200
+    steps = response.json()["execution_schedule"]["steps"]
+    assert steps[0]["status"] == "SUCCEEDED"
+    assert steps[1]["status"] == "READY"
 
 
 def test_execution_fails_closed_without_an_operator_runtime_profile(tmp_path) -> None:

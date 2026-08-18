@@ -630,6 +630,18 @@ def create_app(
             )
 
         audit.plugin_executions.append(execution)
+        if execution.status == PluginExecutionStatus.SUCCEEDED:
+            succeeded_step_ids = {
+                item.plan_step_id
+                for item in audit.execution_schedule.steps
+                if item.status == ScheduledStepStatus.SUCCEEDED
+            }
+            for scheduled_step in audit.execution_schedule.steps:
+                if (
+                    scheduled_step.status == ScheduledStepStatus.PENDING
+                    and set(scheduled_step.depends_on).issubset(succeeded_step_ids)
+                ):
+                    scheduled_step.status = ScheduledStepStatus.READY
         event_type = "step.completed" if execution.status == PluginExecutionStatus.SUCCEEDED else "step.failed"
         return app.state.audit_repository.save_with_event(
             audit,

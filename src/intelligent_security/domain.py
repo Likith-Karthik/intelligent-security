@@ -231,6 +231,23 @@ class PlanStep(BaseModel):
             return str(value)
         return value
 
+    @field_validator("depends_on", mode="before")
+    @classmethod
+    def normalize_numeric_dependency_ids(cls, value):
+        """Canonicalize harmless ordinal references emitted by smaller local models.
+
+        Dependency values are ultimately validated against the declared step IDs, so
+        this conversion cannot introduce a new dependency or bypass plan policy.
+        """
+        if not isinstance(value, list):
+            return value
+        normalized = []
+        for dependency in value:
+            if isinstance(dependency, bool):
+                raise ValueError("Plan dependencies must be string step IDs, not booleans.")
+            normalized.append(str(dependency) if isinstance(dependency, int) else dependency)
+        return normalized
+
     @field_validator("inputs")
     @classmethod
     def inputs_must_be_empty_during_planning(cls, value: dict) -> dict:

@@ -15,26 +15,17 @@
       <section class="panel create-panel">
         <div><p class="eyebrow">NEW ENGAGEMENT</p><h2>Create an audit</h2></div>
         <form id="create-form">
-          <label>Audit name<input name="name" required placeholder="Authorized staging audit" /></label>
-          <label class="wide">Objective<textarea name="objective" required placeholder="Identify security issues in the authorized target."></textarea></label>
-          <label>Target type<select name="target_type"><option value="web_application">Web application</option><option value="source_repository">Source repository</option><option value="network">Network</option><option value="llm_application">LLM application</option></select></label>
-          <label>Target identifier<input name="identifier" type="url" required placeholder="https://staging.example.test" /></label>
-          <label>Authorized asset(s)<input name="authorized_assets" required placeholder="staging.example.test" /><small>Comma-separated</small></label>
-          <label>Authorization ID<input name="authorization_id" required placeholder="SEC-123" /></label>
-          <label>Authorized by<input name="authorized_by" required placeholder="security@example.com" /></label>
-          <label>Valid until<input name="valid_until" type="datetime-local" required /></label>
-          <label>Allowed operations<select name="allowed_operations" multiple size="4"><option value="web_scan" selected>Web scan</option><option value="static_analysis">Static analysis</option><option value="port_discovery">Port discovery</option><option value="llm_red_team">LLM red team</option></select></label>
-          <label>Time budget (seconds)<input name="time_budget_seconds" type="number" min="60" value="3600" required /></label>
-          <label>Cost budget (USD)<input name="cost_budget_usd" type="number" min="0" step="0.01" value="10" required /></label>
-          <label>Approval policy<select name="approval_policy"><option value="human_approval_required">Human approval required</option><option value="human_approval_for_destructive_actions">Approval for destructive actions</option></select></label>
-          <button class="primary wide" type="submit">Create authorized audit</button>
+          <label>Target type<select name="target_type"><option value="web_application">Web application</option><option value="source_repository">Source repository</option><option value="network_host">Network host</option><option value="llm_application">LLM application</option></select></label>
+          <label>Target identifier<input name="identifier" required placeholder="https://staging.example.test" /><small>Use a URL for web, repository, and LLM targets; a hostname or IP address for a network host.</small></label>
+          <p class="wide muted">Comprehensive mode automatically scopes the audit to this target and enables every compatible non-destructive capability from admitted plugins.</p>
+          <button class="primary wide" type="submit">Create comprehensive audit</button>
         </form>
       </section>
       <section class="workspace">
         <div class="audit-bar panel"><div><p class="eyebrow">CURRENT AUDIT</p><h2 id="audit-name">No audit selected</h2><p id="audit-target">Create an audit or paste an Audit ID.</p></div><div class="audit-picker"><input id="audit-id" placeholder="Audit ID" /><button id="load-audit">Load</button></div></div>
         <div id="empty-state" class="panel empty"><h2>Ready when you are</h2><p>Each lifecycle action is enabled only when its preceding state is complete. Plugin selection happens through the API’s capability discovery stage.</p></div>
         <div id="audit-content" hidden>
-          <section class="panel lifecycle"><div class="section-heading"><div><p class="eyebrow">LIFECYCLE</p><h2 id="audit-state">—</h2></div><button id="refresh" class="secondary">Refresh</button></div><div id="actions" class="actions"></div></section>
+          <section class="panel lifecycle"><div class="section-heading"><div><p class="eyebrow">AUTONOMOUS LIFECYCLE</p><h2 id="audit-state">—</h2><p id="automation-status" class="muted">Waiting for an audit.</p></div><div class="automation-controls"><button id="pause" class="secondary">Pause</button><button id="exit" class="secondary">Exit</button><button id="restart" class="primary">Restart</button></div></div><div id="actions" class="actions"></div></section>
           <div class="grid">
             <section class="panel"><p class="eyebrow">PLAN</p><div id="plan" class="content muted">No plan generated.</div></section>
             <section class="panel"><p class="eyebrow">SCHEDULE & EXECUTION</p><div id="schedule" class="content muted">No scheduled steps.</div></section>

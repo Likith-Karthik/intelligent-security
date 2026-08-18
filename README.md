@@ -32,7 +32,7 @@ uvicorn intelligent_security.app:app --app-dir src --reload
 ```
 
 The API is available at `http://127.0.0.1:8000`, with interactive docs at `/docs`.
-The lightweight operator console is served at `http://127.0.0.1:8000/`. It creates authorized audits, advances the lifecycle through the existing API, permits explicit plan approval and step execution, and displays plan, schedule, findings, events, and report links. It contains no plugin-specific runtime configuration, model credentials, or direct plugin invocation logic.
+The lightweight operator console is served at `http://127.0.0.1:8000/`. For the POC it asks only for a target type and target identifier. Comprehensive mode derives the authorized scope from that target and enables every supported non-destructive operation; capability discovery then selects every compatible capability from admitted plugins. It does not authorize linked, third-party, or adjacent infrastructure. The UI supplies fixed local authorization, a one-hour time budget, a $10 cost budget, and the non-destructive approval policy; production deployments should replace those defaults with authenticated, auditable engagement data. Once created, the POC operator console automatically advances lifecycle stages and runs ready plugin steps, continuously displaying plan, schedule, findings, and events. The operator can pause, exit, or restart the automation; a pause takes effect before the next stage or plugin step, so an already-running plugin is allowed to finish. It contains no plugin-specific runtime configuration, model credentials, or direct plugin invocation logic.
 
 ### Test
 
