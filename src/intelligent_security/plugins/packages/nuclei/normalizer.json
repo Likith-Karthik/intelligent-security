@@ -1,0 +1,14 @@
+{
+  "input_artifact_kind": "stdout",
+  "input_format": "jsonl",
+  "fields": {
+    "category": {"path": "type", "default": "vulnerability"},
+    "title": {"path": "info.name", "default": "Nuclei observation"},
+    "description": {"path": "info.description"},
+    "affected_asset": {"path": "host"},
+    "location": {"path": "matched-at"},
+    "severity_reported": {"path": "info.severity"},
+    "confidence": {"default": 0.7},
+    "identifiers": {"path": "info.classification.cwe-id", "default": []}
+  }
+}

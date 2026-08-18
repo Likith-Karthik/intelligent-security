@@ -1,0 +1,37 @@
+# Local secrets and environment files.
+.env
+.env.*
+!.env.example
+
+# Local Python environments, caches, and build output.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local runtime state, databases, evidence, reports, and logs.
+data/
+evidence/
+artifacts/
+reports/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Operator-managed configuration. Commit only the safe examples.
+/config/*.json
+!/config/*.example.json
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
