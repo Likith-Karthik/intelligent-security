@@ -32,6 +32,7 @@ uvicorn intelligent_security.app:app --app-dir src --reload
 ```
 
 The API is available at `http://127.0.0.1:8000`, with interactive docs at `/docs`.
+The lightweight operator console is served at `http://127.0.0.1:8000/`. It creates authorized audits, advances the lifecycle through the existing API, permits explicit plan approval and step execution, and displays plan, schedule, findings, events, and report links. It contains no plugin-specific runtime configuration, model credentials, or direct plugin invocation logic.
 
 ### Test
 

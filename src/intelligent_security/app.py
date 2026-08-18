@@ -4,7 +4,7 @@ from typing import List
 from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from .domain import (
     Audit,
@@ -71,6 +71,19 @@ def create_app(
     app.state.finding_service = FindingService()
     app.state.retest_service = RetestService()
     app.state.report_generator = ReportGenerator(app.state.intelligence_service)
+
+    @app.get("/", include_in_schema=False)
+    def audit_console() -> FileResponse:
+        """Serve the lightweight operator console; all actions remain API-backed."""
+        return FileResponse(os.path.join(os.path.dirname(__file__), "ui", "index.html"))
+
+    @app.get("/ui.css", include_in_schema=False)
+    def audit_console_css() -> FileResponse:
+        return FileResponse(os.path.join(os.path.dirname(__file__), "ui", "ui.css"), media_type="text/css")
+
+    @app.get("/ui.js", include_in_schema=False)
+    def audit_console_js() -> FileResponse:
+        return FileResponse(os.path.join(os.path.dirname(__file__), "ui", "ui.js"), media_type="application/javascript")
 
     @app.post("/audits", response_model=Audit, status_code=status.HTTP_201_CREATED)
     def create_audit(request: AuditCreateRequest) -> Audit:

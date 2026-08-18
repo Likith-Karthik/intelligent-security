@@ -19,7 +19,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-intelligent_security = ["plugins/packages/**/*.json", "plugins/packages/**/*.yaml"]
+intelligent_security = ["plugins/packages/**/*.json", "plugins/packages/**/*.yaml", "ui/*.html", "ui/*.css", "ui/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
