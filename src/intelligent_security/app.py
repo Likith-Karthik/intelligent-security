@@ -14,8 +14,12 @@ from .domain import (
     PlanApprovalRequest,
     PlanValidationStatus,
     FindingValidationRequest,
+    RetestCreateRequest,
+    RetestApprovalRequest,
+    AuditCloseRequest,
     PluginExecution,
     PluginExecutionStatus,
+    ScheduledStep,
     ScheduledStepStatus,
 )
 from .execution.runtime_profiles import PluginRuntimeProfileRegistry
@@ -26,6 +30,7 @@ from .evidence.collector import EvidenceCollector
 from .evidence.normalizer import EvidenceNormalizer
 from .findings.correlator import FindingCorrelator
 from .findings.service import FindingService, FindingServiceError
+from .findings.retest import RetestError, RetestService
 from .reporting.generator import ReportGenerationError, ReportGenerator
 from .policy.plan import PlanPolicyError, validate_plan
 from .policy.scope import ScopeValidationError, validate_scope
@@ -62,6 +67,7 @@ def create_app(
     app.state.evidence_normalizer = EvidenceNormalizer(app.state.evidence_store)
     app.state.finding_correlator = FindingCorrelator()
     app.state.finding_service = FindingService()
+    app.state.retest_service = RetestService()
     app.state.report_generator = ReportGenerator()
 
     @app.post("/audits", response_model=Audit, status_code=status.HTTP_201_CREATED)
@@ -239,6 +245,100 @@ def create_app(
             return PlainTextResponse(app.state.report_generator.generate_markdown(report), media_type="text/markdown")
         except ReportGenerationError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "report_evidence_missing", "message": str(error)})
+
+    @app.post("/audits/{audit_id}/retests", response_model=Audit)
+    def create_retest_plan(audit_id: UUID, request: RetestCreateRequest) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.closed_at is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Closed audits cannot create retests")
+        try:
+            retest = app.state.retest_service.create(audit, request)
+        except RetestError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "retest_rejected", "message": str(error)})
+        audit.retest_plans.append(retest)
+        return app.state.audit_repository.save_with_event(
+            audit, "retest.proposed", {"retest_id": str(retest.retest_id), "finding_count": len(retest.finding_ids), "step_count": len(retest.steps)}
+        )
+
+    @app.post("/audits/{audit_id}/retests/{retest_id}/approve", response_model=Audit)
+    def approve_retest_plan(audit_id: UUID, retest_id: UUID, request: RetestApprovalRequest) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        retest = next((item for item in audit.retest_plans if item.retest_id == retest_id), None)
+        if retest is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Retest plan not found")
+        if retest.status.value != "PENDING_APPROVAL":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Retest plan is not awaiting approval")
+        retest.status = retest.status.APPROVED
+        retest.approved_at = datetime.now(timezone.utc)
+        retest.approved_by = request.approved_by
+        for step in retest.steps:
+            step.status = ScheduledStepStatus.READY
+        return app.state.audit_repository.save_with_event(
+            audit, "retest.approved", {"retest_id": str(retest.retest_id), "approved_by": request.approved_by, "reason": request.reason}
+        )
+
+    @app.post("/audits/{audit_id}/retests/{retest_id}/steps/{retest_step_id}/execute", response_model=Audit)
+    def execute_retest_step(audit_id: UUID, retest_id: UUID, retest_step_id: str) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        retest = next((item for item in audit.retest_plans if item.retest_id == retest_id), None)
+        if retest is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Retest plan not found")
+        if retest.status.value != "APPROVED":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Retest plan cannot execute before approval")
+        step = next((item for item in retest.steps if item.retest_step_id == retest_step_id), None)
+        if step is None or step.status != ScheduledStepStatus.READY:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Retest step is not ready")
+        scheduled = ScheduledStep(plan_step_id=step.retest_step_id, capability=step.capability, contract_version=step.contract_version,
+                                  depends_on=[], status=ScheduledStepStatus.READY, estimated_duration_seconds=1, estimated_cost_usd=0)
+        try:
+            execution = app.state.execution_service.execute(audit, scheduled, app.state.capability_registry)
+        except ExecutionError as error:
+            step.status = ScheduledStepStatus.FAILED
+            return app.state.audit_repository.save_with_event(audit, "retest.step_failed", {"retest_step_id": step.retest_step_id, "code": error.code})
+        audit.plugin_executions.append(execution)
+        step.status = scheduled.status
+        step.execution_id = execution.execution_id
+        step.evidence_id = execution.evidence_record_id
+        return app.state.audit_repository.save_with_event(
+            audit, "retest.step_completed" if execution.status == PluginExecutionStatus.SUCCEEDED else "retest.step_failed",
+            {"retest_id": str(retest.retest_id), "retest_step_id": step.retest_step_id, "execution_id": str(execution.execution_id), "evidence_id": str(execution.evidence_record_id) if execution.evidence_record_id else None},
+        )
+
+    @app.post("/audits/{audit_id}/retests/{retest_id}/compare", response_model=Audit)
+    def compare_retest(audit_id: UUID, retest_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        retest = next((item for item in audit.retest_plans if item.retest_id == retest_id), None)
+        if retest is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Retest plan not found")
+        if retest.status.value != "APPROVED" or any(item.status != ScheduledStepStatus.SUCCEEDED for item in retest.steps):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="All approved retest steps must succeed before comparison")
+        if any(not any(result.evidence_id == item.evidence_id and result.status.value == "SUCCEEDED" for result in audit.observation_normalizations) for item in retest.steps):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Retest evidence must be normalized before comparison")
+        app.state.retest_service.compare(audit, retest)
+        return app.state.audit_repository.save_with_event(audit, "retest.compared", {"retest_id": str(retest.retest_id)})
+
+    @app.post("/audits/{audit_id}/close", response_model=Audit)
+    def close_audit(audit_id: UUID, request: AuditCloseRequest) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.closed_at is not None:
+            return audit
+        unresolved = {"CANDIDATE", "VALIDATION_PENDING", "RETEST_PENDING"}
+        if any(item.state.value in unresolved for item in audit.candidate_findings) or any(item.status.value != "COMPLETED" for item in audit.retest_plans):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Audit has unresolved findings or incomplete retests")
+        audit.closed_at = datetime.now(timezone.utc)
+        audit.closed_by = request.closed_by
+        audit.close_reason = request.reason
+        return app.state.audit_repository.save_with_event(audit, "audit.closed", {"closed_by": request.closed_by, "reason": request.reason})
 
     @app.post("/audits/{audit_id}/profile", response_model=Audit)
     def profile_audit_target(audit_id: UUID) -> Audit:

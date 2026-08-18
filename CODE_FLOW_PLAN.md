@@ -632,6 +632,12 @@ Retest selected findings and close the audit with a complete history.
 
 A retest can execute without repeating unrelated discovery and scanning steps.
 
+### POC implementation
+
+- `POST /audits/{audit_id}/retests` accepts only confirmed or inconclusive findings that already have an admitted validation-capability proposal. It revalidates the persisted scope and canonical target, then creates a human-approval-gated restricted plan.
+- Approved retest steps execute through the same runtime resolver and evidence collector as Flow 8/9. Their evidence must be normalized before `POST /audits/{audit_id}/retests/{retest_id}/compare` updates a finding to `FIXED`, `STILL_PRESENT`, or `INCONCLUSIVE`.
+- `POST /audits/{audit_id}/close` records closure only after retests complete and no candidate or validation work remains.
+
 ## 17. Cross-Cutting Event Flow
 
 Every major state change emits a structured event:

@@ -344,3 +344,16 @@ curl -sS "http://127.0.0.1:8000/audits/$AUDIT_ID/report.md"
 ```
 
 Expected: JSON and Markdown reports include persisted scope, methodology, tools, confirmed findings, inconclusive candidates, evidence metadata references, limitations, and event history. Raw artifact bodies are not embedded. Repeating either request creates no execution and no new audit event.
+
+### 33. Create, execute, and compare a restricted retest
+
+```bash
+curl -X POST "http://127.0.0.1:8000/audits/$AUDIT_ID/retests" \
+  -H 'Content-Type: application/json' \
+  -d '{"finding_ids":["'$FINDING_ID'"]}'
+curl -X POST "http://127.0.0.1:8000/audits/$AUDIT_ID/retests/$RETEST_ID/approve" \
+  -H 'Content-Type: application/json' \
+  -d '{"approved_by":"reviewer@example.test","reason":"Scope reviewed."}'
+```
+
+Execute only the returned retest step, normalize its new evidence, then call `POST /audits/$AUDIT_ID/retests/$RETEST_ID/compare`. Expected: only the selected validation capability is invoked; the finding becomes `FIXED`, `STILL_PRESENT`, or `INCONCLUSIVE`. Close a complete audit with `POST /audits/$AUDIT_ID/close` and a `closed_by`/`reason` body.

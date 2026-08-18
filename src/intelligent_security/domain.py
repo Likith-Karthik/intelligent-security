@@ -444,6 +444,52 @@ class CandidateFinding(BaseModel):
     updated_at: datetime
 
 
+class RetestPlanStatus(str, Enum):
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    COMPLETED = "COMPLETED"
+
+
+class RetestStep(BaseModel):
+    retest_step_id: str
+    finding_id: UUID
+    capability: str
+    contract_version: str
+    status: ScheduledStepStatus = ScheduledStepStatus.PENDING
+    execution_id: Optional[UUID] = None
+    evidence_id: Optional[UUID] = None
+
+
+class RetestPlan(BaseModel):
+    retest_id: UUID = Field(default_factory=uuid4)
+    status: RetestPlanStatus = RetestPlanStatus.PENDING_APPROVAL
+    finding_ids: List[UUID] = Field(..., min_length=1, max_length=100)
+    steps: List[RetestStep] = Field(..., min_length=1, max_length=100)
+    scope_revalidated_at: datetime
+    target_revalidated_at: datetime
+    created_at: datetime
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+
+class RetestCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    finding_ids: List[UUID] = Field(..., min_length=1, max_length=100)
+
+
+class RetestApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    approved_by: str = Field(..., min_length=3, max_length=200)
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
+class AuditCloseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    closed_by: str = Field(..., min_length=3, max_length=200)
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
 class PluginExecution(BaseModel):
     execution_id: UUID = Field(default_factory=uuid4)
     plan_step_id: str
@@ -511,6 +557,10 @@ class Audit(BaseModel):
     observations: List[Observation] = Field(default_factory=list)
     observation_normalizations: List[ObservationNormalization] = Field(default_factory=list)
     candidate_findings: List[CandidateFinding] = Field(default_factory=list)
+    retest_plans: List[RetestPlan] = Field(default_factory=list)
+    closed_at: Optional[datetime] = None
+    closed_by: Optional[str] = None
+    close_reason: Optional[str] = None
 
 
 class AuditEvent(BaseModel):

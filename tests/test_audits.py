@@ -1124,3 +1124,39 @@ def test_flow_10_normalizes_package_output_into_common_observations(tmp_path) ->
     assert evidence_id in markdown_report.text
     assert client.get(f"/audits/{created['id']}/events").json() == events_before
     assert client.get(f"/audits/{created['id']}").json()["plugin_executions"] == executions_before
+
+    proposed_retest = client.post(
+        f"/audits/{created['id']}/retests", json={"finding_ids": [finding["finding_id"]]}
+    )
+    assert proposed_retest.status_code == 200
+    retest = proposed_retest.json()["retest_plans"][-1]
+    assert retest["status"] == "PENDING_APPROVAL"
+    assert len(retest["steps"]) == 1
+    assert retest["steps"][0]["capability"] == "web.vulnerability.validate"
+
+    approved_retest = client.post(
+        f"/audits/{created['id']}/retests/{retest['retest_id']}/approve",
+        json={"approved_by": "reviewer@example.test", "reason": "Retest scope and capability reviewed."},
+    )
+    assert approved_retest.status_code == 200
+    retest_step = approved_retest.json()["retest_plans"][-1]["steps"][0]
+    assert retest_step["status"] == "READY"
+    executed_retest = client.post(
+        f"/audits/{created['id']}/retests/{retest['retest_id']}/steps/{retest_step['retest_step_id']}/execute"
+    )
+    assert executed_retest.status_code == 200
+    retest_evidence_id = executed_retest.json()["retest_plans"][-1]["steps"][0]["evidence_id"]
+    assert retest_evidence_id
+    assert client.post(f"/audits/{created['id']}/evidence/{retest_evidence_id}/normalize").status_code == 200
+    compared = client.post(f"/audits/{created['id']}/retests/{retest['retest_id']}/compare")
+    assert compared.status_code == 200
+    assert compared.json()["retest_plans"][-1]["status"] == "COMPLETED"
+    assert compared.json()["candidate_findings"][-1]["state"] == "STILL_PRESENT"
+
+    closed = client.post(
+        f"/audits/{created['id']}/close",
+        json={"closed_by": "reviewer@example.test", "reason": "Retest completed and audit history retained."},
+    )
+    assert closed.status_code == 200
+    assert closed.json()["closed_at"]
+    assert closed.json()["closed_by"] == "reviewer@example.test"
