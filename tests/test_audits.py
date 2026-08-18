@@ -10,6 +10,8 @@ from intelligent_security.execution.adapters import ContainerCliAdapter
 from intelligent_security.evidence.artifact_store import ArtifactStore
 from intelligent_security.evidence.collector import EvidenceCollector
 from intelligent_security.evidence.normalizer import EvidenceNormalizer
+from intelligent_security.findings.correlator import AIFindingCorrelator
+from intelligent_security.reporting.generator import ReportGenerator
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
 from intelligent_security.planning.service import AuditPlanner
 
@@ -437,6 +439,23 @@ class FakeModelGateway:
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
         return self.response
+
+
+class FakeIntelligence:
+    def generate(self, purpose, system_prompt, context):
+        if purpose == "finding_correlation":
+            observation = context["observations"][0]
+            validation = context["available_validation_capabilities"][0]
+            return ({"findings": [{
+                "observation_ids": [observation["observation_id"]], "evidence_ids": [observation["evidence_id"]],
+                "category": observation["category"], "title": observation["title"],
+                "affected_asset": observation["affected_asset"], "location": observation["location"],
+                "severity_reported": observation["severity_reported"], "confidence": observation["confidence"],
+                "validation_capability": validation["capability"], "rationale": "Evidence-linked test proposal.",
+            }]}, {"model_profile_id": "test-intelligence", "input_digest": "input", "output_digest": "output"})
+        if purpose == "report_generation":
+            return ({"executive_summary": "AI-composed test summary.", "finding_guidance": []}, {"model_profile_id": "test-intelligence", "input_digest": "input", "output_digest": "output"})
+        raise AssertionError("Unexpected intelligence purpose: {}".format(purpose))
 
 
 def write_model_profiles(path) -> None:
@@ -1059,6 +1078,8 @@ def test_flow_10_normalizes_package_output_into_common_observations(tmp_path) ->
         {"container_cli": ContainerCliAdapter(runner)}, EvidenceCollector(evidence_store),
     )
     client.app.state.evidence_normalizer = EvidenceNormalizer(evidence_store)
+    client.app.state.finding_correlator = AIFindingCorrelator(FakeIntelligence())
+    client.app.state.report_generator = ReportGenerator(FakeIntelligence())
     executed = client.post(f"/audits/{created['id']}/steps/scan-web-app/execute").json()
     evidence_id = executed["raw_evidence"][-1]["evidence_id"]
 

@@ -94,7 +94,7 @@ curl -X POST http://127.0.0.1:8000/admin/plugins/refresh \
 
 Refresh reads only the configured plugin-package source, validates every manifest and package-local execution specification, and swaps in the resulting snapshot atomically. It does not install packages, execute plugin binaries, accept arbitrary executable paths, or change allowlists. If admission fails, the prior snapshot remains active. The endpoint is disabled when no token is configured.
 
-### Configure a planner model
+### Configure AI model profiles
 
 Model profiles are held centrally in `config/model_profiles.json`, which is intentionally ignored by Git because it can reveal internal endpoint details. Start from the committed `config/model_profiles.example.json`:
 
@@ -126,7 +126,7 @@ Example profile shape:
 }
 ```
 
-Optionally set `planner_model_profile` in `POST /audits` to select a non-default approved profile. Otherwise the unique enabled profile marked `default_for_purpose` is used.
+`audit_planning` is used for Flow 5. The same enabled default profile is used for the other AI stages in the POC when a dedicated profile is absent; production should configure dedicated `observation_normalization`, `finding_correlation`, `finding_validation`, and `report_generation` profiles. The model always returns structured proposals; deterministic validation still controls evidence references, scope, execution, and finding state.
 
 Before running the service, place a newly generated key in the process environment:
 
@@ -202,4 +202,4 @@ curl -sS "http://127.0.0.1:8000/audits/{audit_id}/report.json"
 curl -sS "http://127.0.0.1:8000/audits/{audit_id}/report.md"
 ```
 
-The output includes confirmed findings and inconclusive candidates with immutable evidence metadata references. It intentionally excludes raw artifact bodies and tool-specific raw observation fields.
+The output includes confirmed findings and inconclusive candidates with immutable evidence metadata references. Flow 12 uses the configured report-generation model to improve the executive summary and evidence-backed guidance, then validates every finding ID before rendering. It intentionally excludes raw artifact bodies and tool-specific raw observation fields.

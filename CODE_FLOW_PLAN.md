@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft |
+| Status | Draft — AI post-processing revision |
 | Scope | POC implementation flow |
 | Parent document | POC Architecture |
 | Last updated | 18 August 2026 |
@@ -13,7 +13,7 @@ This document splits the POC architecture into implementation-sized code flows. 
 
 The implementation should follow one rule throughout:
 
-> The agent produces proposals. Deterministic application code controls authorization, execution, and finding status.
+> AI models interpret evidence and produce typed proposals. Deterministic application code controls authorization, execution, schema validation, evidence integrity, and finding-state transitions.
 
 ## 2. End-to-End Flow
 
@@ -27,9 +27,9 @@ flowchart TD
     F --> G[7. Schedule plan steps]
     G --> H[8. Resolve and execute plugins]
     H --> I[9. Capture raw evidence]
-    I --> J[10. Normalize observations]
-    J --> K[11. Correlate and validate findings]
-    K --> L[12. Generate report]
+    I --> J[10. AI-normalize observations]
+    J --> K[11. AI-correlate and analyze findings]
+    K --> L[12. AI-compose report]
     L --> M[13. Retest and close audit]
 
     F -->|Rejected| E
@@ -66,6 +66,11 @@ src/
 │   ├── service.py
 │   ├── prompts.py
 │   └── model_gateway.py
+├── intelligence/
+│   ├── gateway.py
+│   ├── profiles.py
+│   ├── structured_output.py
+│   └── prompt_versions.py
 ├── policy/
 │   ├── engine.py
 │   └── rules/
@@ -97,14 +102,16 @@ src/
 │   └── builtins/
 ├── evidence/
 │   ├── collector.py
-│   ├── normalizer.py
+│   ├── preprocessor.py
+│   ├── ai_normalizer.py
 │   └── artifact_store.py
 ├── findings/
-│   ├── correlator.py
-│   ├── validator.py
+│   ├── ai_correlator.py
+│   ├── ai_validator.py
 │   └── service.py
 ├── reporting/
-│   ├── generator.py
+│   ├── ai_generator.py
+│   ├── compiler.py
 │   └── templates/
 ├── persistence/
 │   ├── database.py
@@ -482,12 +489,6 @@ Persist immutable execution evidence before interpretation or normalization.
 
 ### POC implementation
 
-- Each plugin package may include a trusted declarative `normalizer.json`; the core currently supports JSONL-to-`observation/v1` mappings without importing arbitrary plugin code.
-- The normalizer reads and checksum-verifies the raw artifact, then records an immutable normalization result and linked observations. Invalid JSON lines or invalid mapped observations are rejected individually and recorded; their source evidence remains intact.
-- `POST /audits/{audit_id}/evidence/{evidence_id}/normalize` runs the admitted package mapping, and `GET /audits/{audit_id}/observations` exposes the common schema.
-
-### POC implementation
-
 - Adapters return a raw execution result alongside their safe summary; the generic container adapter captures the rendered invocation, stdout, stderr, exit code, and timeout details.
 - The collector writes append-only, checksummed artifacts under an audit- and evidence-specific path. The audit stores only immutable metadata, provenance, and artifact URIs; raw bodies are not returned by the API. Adapter contracts also admit optional raw artifacts (for example, HTTP records, files, or screenshots) without changing the core collector.
 - Evidence is captured for successful and failed invoked executions before a future normalizer can inspect tool output. A failure to resolve any permitted runtime remains an unexecuted capability gap, not evidence of a plugin invocation.
@@ -500,15 +501,27 @@ Every completed execution has an immutable evidence record, including failed exe
 
 ### Responsibility
 
-Translate tool-specific output into a versioned common observation schema.
+Use an AI model to interpret tool-specific evidence and translate it into a versioned common observation schema. Package metadata may provide parsing hints, but it must not decide the final semantic meaning.
+
+### Model context
+
+- Bounded, checksum-verified raw evidence excerpts
+- Plugin ID/version and output-format metadata
+- Target profile and authorized scope summary
+- Package-supplied field hints or schema documentation
+- The required `observation/v1` JSON schema
+- Evidence and artifact IDs that the model is permitted to reference
 
 ### Processing
 
-1. Invoke the plugin normalizer.
-2. Validate normalized output.
-3. Link every observation to raw evidence.
-4. Preserve unknown fields as tool-specific metadata.
-5. Reject malformed observations without discarding raw evidence.
+1. Verify artifact checksums and preprocess the plugin output into bounded chunks.
+2. Build a prompt that treats all tool output as untrusted data, not instructions.
+3. Call the configured `observation_normalization` model profile through the provider-neutral gateway.
+4. Require structured JSON output matching `observation/v1`.
+5. Deterministically reject invented evidence IDs, out-of-scope assets, malformed observations, invalid severity/confidence values, and unsupported identifiers.
+6. Link accepted observations to immutable evidence and store model profile, prompt version, input digest, and output digest.
+7. Preserve relevant unknown tool fields as bounded tool-specific metadata.
+8. On invalid output, perform a bounded repair attempt; if repair fails, record normalization failure without discarding raw evidence.
 
 ### Normalized observation fields
 
@@ -524,27 +537,47 @@ Translate tool-specific output into a versioned common observation schema.
 
 ### Primary modules
 
-- `evidence/normalizer.py`
+- `evidence/preprocessor.py`
+- `evidence/ai_normalizer.py`
+- `intelligence/gateway.py`
+- `intelligence/structured_output.py`
 - `domain/evidence.py`
+
+### Revised implementation target
+
+- `normalizer.json` becomes optional package-supplied parsing guidance rather than the semantic normalizer.
+- `POST /audits/{audit_id}/evidence/{evidence_id}/normalize` invokes the selected AI normalization profile, then passes its output through deterministic schema and evidence-reference validation.
+- Model output is advisory data until accepted by the validator. The model cannot edit raw evidence or invent a new target, execution, or artifact reference.
 
 ### Completion test
 
-Semgrep and Nuclei results can be queried through the same observation interface.
+Semgrep and Nuclei results with different native formats are interpreted by the model and queried through the same observation interface. Prompt-injection text embedded in tool output cannot alter scope or create an observation without a valid evidence reference.
 
 ## 14. Flow 11 — Correlate and Validate Findings
 
 ### Responsibility
 
-Group related observations and decide whether they represent reportable vulnerabilities.
+Use an AI model to correlate observations, explain likely security impact, reduce duplicates, and propose evidence-backed finding and validation decisions.
+
+### Model context
+
+- Accepted normalized observations only
+- Immutable evidence metadata and permitted evidence IDs
+- Target profile and scope boundaries
+- Available safe validation capability contracts
+- Existing candidate findings and prior validation outcomes
+- Required finding-proposal and validation-analysis schemas
 
 ### Processing
 
-1. Correlate by target, location, vulnerability class, and evidence.
-2. Create a candidate finding.
-3. Select a safe validation capability when available.
-4. Submit validation steps through normal policy approval.
-5. Record validation outcomes.
-6. Promote only supported candidates to confirmed findings.
+1. Ask the model to group related observations by target, location, vulnerability class, exploitability, and evidence.
+2. Require structured candidate-finding proposals with rationale, impact, confidence, observation IDs, and evidence IDs.
+3. Deterministically verify that every referenced observation/evidence record exists and belongs to the audit.
+4. Ask the model to select and justify a safe validation capability from the supplied capability contracts.
+5. Submit proposed validation steps through the normal deterministic scope, policy, budget, and approval pipeline.
+6. After validation execution, ask the model to analyze the new evidence against the candidate and recommend `CONFIRMED`, `REJECTED`, or `INCONCLUSIVE` with a cited basis.
+7. Deterministically validate the recommendation and apply the configured confirmation policy. The model alone cannot transition finding state.
+8. Store model/profile versions, prompts, rationale, citations, validation evidence, and the final policy decision.
 
 ### Finding states
 
@@ -558,25 +591,39 @@ CANDIDATE
 
 ### Primary modules
 
-- `findings/correlator.py`
-- `findings/validator.py`
+- `findings/ai_correlator.py`
+- `findings/ai_validator.py`
 - `findings/service.py`
+- `intelligence/gateway.py`
+- `policy/finding.py`
 
-### POC implementation
+### Revised implementation target
 
-- `POST /audits/{audit_id}/findings/correlate` deterministically groups observations by category, asset, location, identifiers, and title. Each candidate preserves the source observation and immutable evidence IDs plus the correlation key.
-- A package capability can declare `validation_for` capability contracts. Correlation may propose one of these safe validation capabilities, but it is only a proposal: it must enter the normal plan/approval workflow before execution.
-- `POST /audits/{audit_id}/findings/{finding_id}/validation` records a validation outcome only with evidence already linked to that candidate. Correlation alone never confirms a finding.
+- `POST /audits/{audit_id}/findings/correlate` invokes the configured `finding_correlation` model profile and validates its typed proposals.
+- Validation-result analysis uses a separate `finding_validation` profile so its prompt, temperature, and authorization policy can evolve independently.
+- A package capability may still declare `validation_for`; only those admitted capabilities are shown to the model.
+- Confirmation policy remains configurable: human approval, deterministic rule plus model recommendation, or bounded automated confirmation for explicitly allowed low-risk classes.
 
 ### Completion test
 
-No candidate becomes `CONFIRMED` without linked evidence and a recorded validation basis.
+No candidate becomes `CONFIRMED` merely because the model says so. Confirmation requires existing linked evidence, an accepted model analysis, a recorded validation basis, and the configured deterministic approval decision.
 
 ## 15. Flow 12 — Generate Report
 
 ### Responsibility
 
-Create reports from persisted audit state rather than directly from raw model output.
+Use an AI model to compose a clear, contextual security report from persisted audit state, while a deterministic compiler verifies all claims and evidence citations before publishing.
+
+### Model context
+
+- Persisted scope, exclusions, target profile, and methodology
+- Executed tools and versions
+- Confirmed findings and inconclusive candidates
+- Accepted validation bases and evidence metadata references
+- Audit limitations and event-history summary
+- Required structured report-draft schema and audience/tone settings
+
+Raw credentials and unrestricted raw artifacts are not supplied. Evidence excerpts are included only when policy permits and are bounded/redacted.
 
 ### Report sections
 
@@ -599,19 +646,58 @@ Create reports from persisted audit state rather than directly from raw model ou
 
 ### Primary modules
 
-- `reporting/generator.py`
+- `reporting/ai_generator.py`
+- `reporting/compiler.py`
 - `reporting/templates/*`
+- `intelligence/gateway.py`
 - `api/reports.py`
 
-### POC implementation
+### Processing
 
-- `GET /audits/{audit_id}/report.json` returns a JSON integration report and `GET /audits/{audit_id}/report.md` renders its Markdown equivalent. Neither endpoint writes audit state, emits an event, invokes a model, or reruns a plugin.
-- Reports include only confirmed findings and inconclusive candidates; each rendered finding is checked against persisted raw evidence and contains metadata references rather than raw artifact content.
-- The report includes scope, persisted plan methodology, executed tool versions, limitations, and execution/approval event history.
+1. Create a canonical persisted-state snapshot and content digest.
+2. Call the configured `report_generation` model profile for a structured report draft.
+3. Validate section schema, finding IDs, evidence citations, tool versions, scope statements, and finding states.
+4. Reject unsupported claims or citations and optionally request one bounded repair.
+5. Compile the accepted draft into JSON and Markdown using deterministic templates.
+6. Persist the report snapshot, model/profile version, prompt version, input digest, and output digest.
+7. Return the stored report for the same input digest unless explicit regeneration is requested.
+
+### Revised implementation target
+
+- `GET /audits/{audit_id}/report.json` and `GET /audits/{audit_id}/report.md` return an AI-composed but deterministically verified persisted report.
+- The model may improve explanation, prioritization, remediation guidance, and executive summaries, but it cannot add a finding that is absent from persisted accepted state.
+- Report generation never reruns a plugin or changes a finding state.
 
 ### Completion test
 
-Every finding in the report resolves to stored evidence, and regenerating the report does not rerun the audit.
+Every finding and security claim in the report resolves to persisted accepted state and stored evidence. Repeating report retrieval does not call the model or rerun the audit when the input-state digest is unchanged.
+
+## 15.1 Shared AI Processing Contract
+
+Flows 5, 10, 11, and 12 use the same provider-neutral gateway but select independently configurable model profiles by purpose:
+
+| Purpose | Used by | Expected output |
+|---|---|---|
+| `audit_planning` | Flow 5 | Capability-level plan DAG |
+| `observation_normalization` | Flow 10 | `observation/v1` batch |
+| `finding_correlation` | Flow 11 | Evidence-linked finding proposals |
+| `finding_validation` | Flow 11 and Flow 13 | Evidence-cited outcome recommendation |
+| `report_generation` | Flow 12 | Structured report draft |
+
+Each profile independently declares provider, model ID, endpoint, credential reference, temperature, token limit, timeout, retry limit, and enabled/default status. A single model may serve every purpose for the POC, while production can assign specialized or self-hosted models per stage without changing flow code.
+
+Every AI call must persist operational provenance:
+
+- Purpose and model-profile ID
+- Model ID/provider and prompt-template version
+- Canonical input digest and output digest
+- Referenced audit, execution, evidence, observation, and finding IDs
+- Start/completion timestamps, token/latency metadata when available
+- Validation status, repair count, and redacted error details
+
+All model inputs are bounded and treat target/plugin content as untrusted data. Models receive opaque credential references only when required by a plugin; orchestration-model credentials are resolved by the gateway and never enter prompts or persisted output.
+
+If an AI service is unavailable, the flow records a retryable processing failure and preserves the last accepted state. It must not silently fall back to unvalidated free text or advance finding state.
 
 ## 16. Flow 13 — Retest and Close Audit
 
@@ -706,13 +792,16 @@ The safest implementation order is:
 6. Raw evidence storage
 7. Semgrep plugin
 8. Nuclei plugin
-9. Normalization and findings
-10. AI planner
-11. Policy-based replanning and approvals
-12. Promptfoo and MCP adapters
-13. Reporting and retesting
+9. Shared model gateway, purpose-specific profiles, and structured-output validation
+10. AI planner with deterministic plan policy
+11. AI observation normalization with evidence-reference validation
+12. AI finding correlation and validation analysis with deterministic state policy
+13. AI report composition with deterministic citation compiler
+14. Policy-based replanning and approvals
+15. Promptfoo and MCP adapters
+16. Reporting persistence and retesting
 
-AI planning is intentionally introduced only after a manually authored plan can execute safely end to end.
+AI interpretation is introduced only after raw evidence can be captured immutably and every AI-produced schema has a deterministic validator. The harness should make model selection replaceable at every AI stage.
 
 ## 20. POC Milestones
 
@@ -728,11 +817,15 @@ Run Semgrep and Nuclei against deliberately vulnerable test targets through type
 
 Generate a plan from target metadata and the live capability registry, then validate it before execution.
 
-### Milestone D — Plugin Replacement
+### Milestone D — AI Evidence Intelligence
+
+Use purpose-specific model profiles to normalize heterogeneous tool evidence, correlate observations, analyze validation results, and compose a cited report. Demonstrate that hallucinated IDs, out-of-scope claims, and prompt-injection content are rejected deterministically.
+
+### Milestone E — Plugin Replacement
 
 Add, disable, and remove native-tool, MCP, and LLM-testing plugin manifests through an operator-controlled registry refresh. Demonstrate planner discovery updates, late-bound fallback selection, and a clear capability-gap response without core-code changes or service restart.
 
-### Milestone E — Evidence-Backed Demo
+### Milestone F — Evidence-Backed Demo
 
 Run an authorized audit, validate at least one finding, generate a report, apply a test fix, and retest it.
 
@@ -742,6 +835,8 @@ Each flow is complete only when it has:
 
 - Versioned input and output schemas
 - Deterministic validation
+- Model profile and prompt-template provenance for AI-backed flows
+- Tests for hallucinated references and prompt injection in untrusted evidence
 - Unit tests
 - At least one integration test
 - Structured events

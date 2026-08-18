@@ -27,9 +27,10 @@ from .execution.adapters import ContainerCliAdapter
 from .execution.service import ExecutionError, ExecutionService
 from .evidence.artifact_store import ArtifactStore
 from .evidence.collector import EvidenceCollector
-from .evidence.normalizer import EvidenceNormalizer
-from .findings.correlator import FindingCorrelator
+from .evidence.normalizer import AIEvidenceNormalizer
+from .findings.correlator import AIFindingCorrelator
 from .findings.service import FindingService, FindingServiceError
+from .intelligence.service import IntelligenceService
 from .findings.retest import RetestError, RetestService
 from .reporting.generator import ReportGenerationError, ReportGenerator
 from .policy.plan import PlanPolicyError, validate_plan
@@ -57,6 +58,7 @@ def create_app(
     app.state.capability_registry = CapabilityRegistry(plugin_manifest_directory)
     app.state.registry_admin_token = registry_admin_token or os.getenv("PLUGIN_REGISTRY_ADMIN_TOKEN")
     app.state.model_profile_registry = ModelProfileRegistry(model_profiles_path)
+    app.state.intelligence_service = IntelligenceService(app.state.model_profile_registry)
     app.state.audit_planner = AuditPlanner(OpenAICompatibleModelGateway())
     app.state.evidence_store = ArtifactStore(evidence_directory or os.getenv("EVIDENCE_DIRECTORY", "data/evidence"))
     app.state.execution_service = ExecutionService(
@@ -64,11 +66,11 @@ def create_app(
         {"container_cli": ContainerCliAdapter()},
         EvidenceCollector(app.state.evidence_store),
     )
-    app.state.evidence_normalizer = EvidenceNormalizer(app.state.evidence_store)
-    app.state.finding_correlator = FindingCorrelator()
+    app.state.evidence_normalizer = AIEvidenceNormalizer(app.state.evidence_store, app.state.intelligence_service)
+    app.state.finding_correlator = AIFindingCorrelator(app.state.intelligence_service)
     app.state.finding_service = FindingService()
     app.state.retest_service = RetestService()
-    app.state.report_generator = ReportGenerator()
+    app.state.report_generator = ReportGenerator(app.state.intelligence_service)
 
     @app.post("/audits", response_model=Audit, status_code=status.HTTP_201_CREATED)
     def create_audit(request: AuditCreateRequest) -> Audit:

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from intelligent_security.domain import Audit, AuditEvent, CandidateFinding, FindingState
+from intelligent_security.intelligence.service import IntelligenceService
 
 
 class ReportGenerationError(Exception):
@@ -10,11 +11,14 @@ class ReportGenerationError(Exception):
 class ReportGenerator:
     report_version = "1"
 
+    def __init__(self, intelligence: IntelligenceService = None) -> None:
+        self.intelligence = intelligence
+
     def generate_json(self, audit: Audit, events: list) -> dict:
         evidence_by_id = {item.evidence_id: item for item in audit.raw_evidence}
         confirmed = [item for item in audit.candidate_findings if item.state == FindingState.CONFIRMED]
         inconclusive = [item for item in audit.candidate_findings if item.state == FindingState.INCONCLUSIVE]
-        return {
+        report = {
             "report_version": self.report_version,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "audit": {"id": str(audit.id), "name": audit.name, "objective": audit.objective, "state": audit.state.value},
@@ -36,6 +40,31 @@ class ReportGenerator:
             "audit_limitations": self._limitations(audit),
             "execution_and_approval_history": [self._event(event) for event in events],
         }
+        if self.intelligence is not None:
+            try:
+                draft, provenance = self.intelligence.generate(
+                    "report_generation",
+                    "Return JSON only: {executive_summary, finding_guidance:[{finding_id,reproduction_guidance,remediation_recommendation}]}. Use only supplied finding IDs. Do not invent findings or evidence.",
+                    {"audit": report["audit"], "scope": report["scope"], "tools": report["tools"],
+                     "confirmed_findings": report["confirmed_findings"], "inconclusive_candidates": report["inconclusive_candidates"],
+                     "limitations": report["audit_limitations"]},
+                )
+                known = {item["finding_id"]: item for item in report["confirmed_findings"] + report["inconclusive_candidates"]}
+                for guidance in draft.get("finding_guidance", []):
+                    finding = known.get(guidance.get("finding_id"))
+                    if finding is None:
+                        raise ReportGenerationError("AI report draft references an unknown finding.")
+                    for field in ("reproduction_guidance", "remediation_recommendation"):
+                        if isinstance(guidance.get(field), str) and len(guidance[field]) <= 4000:
+                            finding[field] = guidance[field]
+                if isinstance(draft.get("executive_summary"), str) and len(draft["executive_summary"]) <= 4000:
+                    report["executive_summary"]["narrative"] = draft["executive_summary"]
+                report["ai_provenance"] = provenance
+            except ReportGenerationError:
+                raise
+            except Exception as error:
+                raise ReportGenerationError("AI report generation failed: {}".format(error))
+        return report
 
     def generate_markdown(self, report: dict) -> str:
         lines = [

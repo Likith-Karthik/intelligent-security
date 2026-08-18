@@ -18,11 +18,11 @@ Adding a plugin that uses an existing adapter is manifest/configuration work. Ad
 3. Use a unique `plugin_id` and declare one or more versioned capabilities.
 4. Do not place API keys, passwords, shell commands, arbitrary executable paths, or raw MCP instructions in the manifest.
 5. For an executable package, add a package-owned `execution.json` for an existing adapter and a matching operator-managed runtime profile in `config/plugin_runtimes.json`.
-6. To expose tool results to later finding workflows, add a declarative `normalizer.json`. It maps the package's stored JSONL artifact to the common `observation/v1` schema; do not add plugin-specific parsing logic to the core service.
+6. To expose tool results to later finding workflows, add a declarative `normalizer.json`. It supplies parsing hints for the AI observation-normalization stage; do not add plugin-specific semantic logic to the core service.
 
 ## Package normalizer specification
 
-`normalizer.json` is admitted with the package and is never provided to the planner. The POC supports JSONL input and dotted paths into each JSON object. `category` and `title` are required mappings; all other common fields are optional. The complete original JSON object is retained as `tool_metadata` so unknown tool fields are not lost.
+`normalizer.json` is admitted with the package and is never provided to the planner. It describes the expected artifact format and optional field hints for the bounded AI normalization prompt. The model's structured output is accepted only after deterministic schema, scope, checksum, and evidence-reference validation. Unknown tool fields may be retained as bounded `tool_metadata`.
 
 ```json
 {
@@ -38,7 +38,7 @@ Adding a plugin that uses an existing adapter is manifest/configuration work. Ad
 }
 ```
 
-Run `POST /audits/{audit_id}/evidence/{evidence_id}/normalize` after Flow 9 capture. A malformed line is rejected and recorded in the normalization result, but its immutable raw artifact is retained. Query common observations with `GET /audits/{audit_id}/observations`.
+Run `POST /audits/{audit_id}/evidence/{evidence_id}/normalize` after Flow 9 capture. An unavailable model or invalid model output is recorded as a normalization failure, but immutable raw evidence is retained. Query common observations with `GET /audits/{audit_id}/observations`.
 
 ## Validation capabilities
 

@@ -381,6 +381,9 @@ class ObservationNormalization(BaseModel):
     accepted_count: int = Field(..., ge=0)
     rejected_count: int = Field(..., ge=0)
     errors: List[str] = Field(default_factory=list, max_length=100)
+    model_profile_id: Optional[str] = None
+    input_digest: Optional[str] = None
+    output_digest: Optional[str] = None
 
 
 class FindingState(str, Enum):
@@ -440,6 +443,9 @@ class CandidateFinding(BaseModel):
     source_capabilities: List[str] = Field(default_factory=list)
     validation_proposal: Optional[FindingValidationProposal] = None
     validation_history: List[FindingValidationBasis] = Field(default_factory=list)
+    model_profile_id: Optional[str] = None
+    input_digest: Optional[str] = None
+    output_digest: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
