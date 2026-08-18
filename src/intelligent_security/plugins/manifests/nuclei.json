@@ -1,0 +1,18 @@
+{
+  "plugin_id": "nuclei",
+  "plugin_version": "1",
+  "enabled": true,
+  "health": "declared_healthy",
+  "capabilities": [
+    {
+      "capability": "web.vulnerability_scan",
+      "description": "Run template-based vulnerability scans against an authorized web application or API.",
+      "target_types": ["web_application", "api"],
+      "required_operation": "web_scan",
+      "required_inputs": ["target_profile", "scope_policy"],
+      "estimated_duration_seconds": 600,
+      "estimated_cost_usd": 0,
+      "reliability": 0.85
+    }
+  ]
+}

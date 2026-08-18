@@ -18,5 +18,8 @@ dev = [
   "pytest>=8.0,<9.0",
 ]
 
+[tool.setuptools.package-data]
+intelligent_security = ["plugins/manifests/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

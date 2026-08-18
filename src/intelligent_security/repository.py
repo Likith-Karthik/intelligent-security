@@ -52,6 +52,7 @@ class AuditRepository:
             time_budget_seconds=request.time_budget_seconds,
             cost_budget_usd=request.cost_budget_usd,
             approval_policy=request.approval_policy,
+            planner_model_profile=request.planner_model_profile,
             state=AuditState.CREATED,
             created_at=created_at,
         )

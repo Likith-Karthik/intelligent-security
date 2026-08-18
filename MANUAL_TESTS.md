@@ -158,3 +158,65 @@ Expected:
 Create a scope-validated `source_repository` audit, then profile it.
 
 Expected: `source_available` is `true`, `network_allowlist` remains empty in the scope policy, and the profile interface is the normalized repository URL.
+
+## Flow 4 Manual Tests
+
+### 15. Discover a compatible capability
+
+Create, scope-validate, and profile a web application audit with `web_scan` authorized. Then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/capabilities/discover
+```
+
+Expected:
+
+- Response is `200 OK` and state is `CAPABILITIES_DISCOVERED`.
+- The candidate list contains Nuclei's `web.vulnerability_scan` capability.
+- Candidate health is `declared_healthy`; no binary has been executed.
+- The event list ends with `capabilities.discovered`.
+
+### 16. Check capability gaps and idempotency
+
+Run the service with an empty plugin-manifest directory, then discover capabilities for an otherwise valid web audit. Also call discovery twice on a normally configured audit.
+
+Expected:
+
+- The empty registry returns no candidates and a `web_scan` gap.
+- Repeated discovery returns the stored result and creates only one `capabilities.discovered` event.
+
+### 17. Add a manifest without application changes
+
+Add a JSON file under `src/intelligent_security/plugins/manifests/` following the existing manifest shape, restart the service, and run discovery for a compatible target.
+
+Expected: the new enabled `declared_healthy` capability appears in the ranked candidate list without changing the planner, API, or scheduler code.
+
+## Flow 5 Manual Tests — After Model Details Are Configured
+
+### 18. Verify unconfigured model behavior
+
+Create an audit through capability discovery, then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/plan/generate
+```
+
+Expected before model setup: `503` with code `model_profile_unavailable`. No plan or `plan.proposed` event is created.
+
+### 19. Generate and inspect a plan
+
+After configuring an approved profile and its `env://` credential, call the same endpoint on a capability-discovered audit.
+
+Expected:
+
+- Response is `200 OK` and state is `PLAN_PROPOSED`.
+- Every plan step references a discovered capability only.
+- Step IDs are unique; dependencies refer only to known steps and contain no cycle.
+- The audit event list ends in `plan.proposed`.
+- The response contains no credential value.
+
+### 20. Test invalid model output
+
+Use a controlled test model or mock endpoint that returns a plan with an unknown capability, duplicate step ID, unknown dependency, or dependency cycle.
+
+Expected: `422` with the corresponding planning error, while the audit remains `CAPABILITIES_DISCOVERED` and no `plan.proposed` event is emitted.

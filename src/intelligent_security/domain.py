@@ -22,6 +22,8 @@ class AuditState(str, Enum):
     SCOPE_VALIDATED = "SCOPE_VALIDATED"
     SCOPE_REJECTED = "SCOPE_REJECTED"
     TARGET_PROFILED = "TARGET_PROFILED"
+    CAPABILITIES_DISCOVERED = "CAPABILITIES_DISCOVERED"
+    PLAN_PROPOSED = "PLAN_PROPOSED"
 
 
 class AuditOperation(str, Enum):
@@ -84,6 +86,92 @@ class TargetProfile(BaseModel):
     profiled_at: datetime
 
 
+class PluginHealth(str, Enum):
+    DECLARED_HEALTHY = "declared_healthy"
+    DECLARED_UNHEALTHY = "declared_unhealthy"
+
+
+class PluginCapability(BaseModel):
+    capability: str = Field(..., min_length=3, max_length=200)
+    description: str = Field(..., min_length=1, max_length=1000)
+    target_types: List[str] = Field(..., min_length=1, max_length=50)
+    required_operation: AuditOperation
+    required_inputs: List[str] = Field(default_factory=list, max_length=20)
+    estimated_duration_seconds: int = Field(..., ge=1, le=604800)
+    estimated_cost_usd: float = Field(..., ge=0, le=1000000)
+    reliability: float = Field(..., ge=0, le=1)
+
+
+class PluginManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plugin_id: str = Field(..., min_length=3, max_length=200)
+    plugin_version: str = Field(..., min_length=1, max_length=100)
+    enabled: bool = True
+    health: PluginHealth = PluginHealth.DECLARED_HEALTHY
+    capabilities: List[PluginCapability] = Field(..., min_length=1, max_length=100)
+
+
+class CapabilityCandidate(BaseModel):
+    rank: int
+    capability: str
+    description: str
+    plugin_id: str
+    plugin_version: str
+    required_operation: AuditOperation
+    required_inputs: List[str]
+    estimated_duration_seconds: int
+    estimated_cost_usd: float
+    reliability: float
+    health: PluginHealth
+
+
+class CapabilityGap(BaseModel):
+    operation: AuditOperation
+    reason: str
+
+
+class CapabilityDiscovery(BaseModel):
+    registry_version: str
+    target_type: str
+    candidates: List[CapabilityCandidate]
+    gaps: List[CapabilityGap]
+    discovered_at: datetime
+
+
+class ModelProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str = Field(..., min_length=3, max_length=100)
+    purpose: str = Field(..., min_length=1, max_length=100)
+    provider: str = Field(..., min_length=1, max_length=100)
+    model: str = Field(..., min_length=1, max_length=200)
+    credential_reference: CredentialReference
+    base_url: str = Field(..., min_length=1, max_length=2048)
+    temperature: float = Field(..., ge=0, le=2)
+    max_output_tokens: int = Field(..., ge=100, le=100000)
+    timeout_seconds: int = Field(..., ge=1, le=600)
+    enabled: bool = True
+    default_for_purpose: bool = False
+
+
+class PlanStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., min_length=1, max_length=100)
+    capability: str = Field(..., min_length=3, max_length=200)
+    depends_on: List[str] = Field(default_factory=list, max_length=100)
+    inputs: dict = Field(default_factory=dict)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class AuditPlan(BaseModel):
+    plan_version: str
+    model_profile_id: str
+    steps: List[PlanStep] = Field(..., min_length=1, max_length=100)
+    generated_at: datetime
+
+
 class AuditCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -96,6 +184,7 @@ class AuditCreateRequest(BaseModel):
     time_budget_seconds: int = Field(..., ge=60, le=604800)
     cost_budget_usd: float = Field(..., ge=0, le=1000000)
     approval_policy: str = Field(..., min_length=1, max_length=100)
+    planner_model_profile: Optional[str] = Field(default=None, min_length=3, max_length=100)
 
 
 
@@ -116,6 +205,11 @@ class Audit(BaseModel):
     scope_validated_at: Optional[datetime] = None
     target_profile: Optional[TargetProfile] = None
     target_profiled_at: Optional[datetime] = None
+    capability_discovery: Optional[CapabilityDiscovery] = None
+    capabilities_discovered_at: Optional[datetime] = None
+    planner_model_profile: Optional[str] = None
+    audit_plan: Optional[AuditPlan] = None
+    plan_proposed_at: Optional[datetime] = None
 
 
 class AuditEvent(BaseModel):
