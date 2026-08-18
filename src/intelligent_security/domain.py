@@ -21,6 +21,7 @@ class AuditState(str, Enum):
     CREATED = "CREATED"
     SCOPE_VALIDATED = "SCOPE_VALIDATED"
     SCOPE_REJECTED = "SCOPE_REJECTED"
+    TARGET_PROFILED = "TARGET_PROFILED"
 
 
 class AuditOperation(str, Enum):
@@ -70,6 +71,19 @@ class ScopePolicy(BaseModel):
     valid_until: datetime
 
 
+class TargetProfile(BaseModel):
+    profile_version: str
+    profile_method: str
+    target_type: str
+    canonical_identifier: str
+    interfaces: List[str]
+    technologies: List[str]
+    source_available: bool
+    authentication: str
+    confidence: float = Field(..., ge=0, le=1)
+    profiled_at: datetime
+
+
 class AuditCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -100,6 +114,8 @@ class Audit(BaseModel):
     created_at: datetime
     scope_policy: Optional[ScopePolicy] = None
     scope_validated_at: Optional[datetime] = None
+    target_profile: Optional[TargetProfile] = None
+    target_profiled_at: Optional[datetime] = None
 
 
 class AuditEvent(BaseModel):

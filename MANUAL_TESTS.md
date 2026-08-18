@@ -123,3 +123,38 @@ Expected: both calls return `200`, the audit remains `SCOPE_VALIDATED`, and only
 Create an audit with target type `source_repository`, target and authorized asset `https://github.com/example/security-demo`, and allowed operation `static_analysis`. Validate it.
 
 Expected: `scope_policy.filesystem_boundaries` contains the normalized repository URL and `network_allowlist` is empty.
+
+## Flow 3 Manual Tests
+
+### 12. Profile a validated web target
+
+Create and successfully scope-validate an audit, then call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/profile
+```
+
+Expected:
+
+- Response is `200 OK` and state is `TARGET_PROFILED`.
+- `target_profile.canonical_identifier` is normalized.
+- `interfaces` contains only that canonical identifier.
+- `profile_method` is `declared_metadata`.
+- `technologies` is empty; this POC flow has not performed active discovery.
+- An `target.profiled` event follows `scope.validated`.
+
+### 13. Verify profiling is scope-gated and idempotent
+
+Call the profile endpoint on an audit still in `CREATED`, then call it twice on a `SCOPE_VALIDATED` audit.
+
+Expected:
+
+- The first call returns `409`.
+- Both calls for the scope-validated audit return `200`.
+- Only one `target.profiled` event exists.
+
+### 14. Profile a source repository
+
+Create a scope-validated `source_repository` audit, then profile it.
+
+Expected: `source_available` is `true`, `network_allowlist` remains empty in the scope policy, and the profile interface is the normalized repository URL.

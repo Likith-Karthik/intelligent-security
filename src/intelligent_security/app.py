@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from .domain import Audit, AuditCreateRequest, AuditEvent, AuditState
 from .policy.scope import ScopeValidationError, validate_scope
+from .profiling.service import TargetProfilingError, profile_target
 from .repository import AuditRepository
 
 
@@ -66,6 +67,39 @@ def create_app(database_path: str = None) -> FastAPI:
             audit,
             "scope.validated",
             {"authorization_id": scope_policy.authorization_id},
+        )
+
+    @app.post("/audits/{audit_id}/profile", response_model=Audit)
+    def profile_audit_target(audit_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.state == AuditState.TARGET_PROFILED:
+            return audit
+        if audit.state != AuditState.SCOPE_VALIDATED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Audit target cannot be profiled before scope validation",
+            )
+        try:
+            target_profile = profile_target(audit)
+        except TargetProfilingError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": error.code, "message": error.message},
+            )
+
+        audit.target_profile = target_profile
+        audit.target_profiled_at = target_profile.profiled_at
+        audit.state = AuditState.TARGET_PROFILED
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "target.profiled",
+            {
+                "profile_version": target_profile.profile_version,
+                "profile_method": target_profile.profile_method,
+                "target_type": target_profile.target_type,
+            },
         )
 
     @app.get("/health")

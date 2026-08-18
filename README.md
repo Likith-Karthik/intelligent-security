@@ -8,6 +8,7 @@ The current implementation supports two flows:
 
 1. Create an audit: accept a typed audit request, persist it in SQLite, set its state to `CREATED`, and emit an immutable `audit.created` event.
 2. Validate authorization and scope: compile the request into a machine-enforceable scope policy and transition the audit to `SCOPE_VALIDATED` or `SCOPE_REJECTED`.
+3. Profile the target: derive a safe, deterministic target profile from validated metadata and transition the audit to `TARGET_PROFILED`.
 
 Credential values are not accepted; only opaque credential references are persisted.
 
@@ -60,3 +61,11 @@ curl -X POST http://127.0.0.1:8000/audits/{audit_id}/scope/validate
 ```
 
 Expected result: `200 OK`, audit state `SCOPE_VALIDATED`, a normalized `scope_policy`, and a second `scope.validated` event. A target outside the authorized assets, expired authorization, or entirely prohibited operation set returns `422` and leaves the audit in `SCOPE_REJECTED`.
+
+### Profile target
+
+```bash
+curl -X POST http://127.0.0.1:8000/audits/{audit_id}/profile
+```
+
+Expected result: `200 OK`, audit state `TARGET_PROFILED`, a versioned `target_profile`, and a `target.profiled` event. Profiling currently uses only already-authorized metadata: it makes no DNS, HTTP, port, or repository requests. Calling it before scope validation returns `409`.

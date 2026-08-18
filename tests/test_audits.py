@@ -155,3 +155,82 @@ def test_scope_validation_compiles_source_repository_filesystem_boundary(tmp_pat
     policy = response.json()["scope_policy"]
     assert policy["filesystem_boundaries"] == ["https://github.com/example/security-demo"]
     assert policy["network_allowlist"] == []
+
+
+def test_target_profiling_requires_validated_scope(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = client.post("/audits", json=valid_request()).json()
+
+    response = client.post(f"/audits/{created['id']}/profile")
+
+    assert response.status_code == 409
+
+
+def test_target_profiling_builds_deterministic_web_profile_and_event(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    request = valid_request()
+    request["target"]["identifier"] = "https://STAGING.EXAMPLE.TEST/"
+    request["scope"]["authorized_assets"] = ["staging.example.test"]
+    created = client.post("/audits", json=request).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/profile")
+
+    assert response.status_code == 200
+    audit = response.json()
+    assert audit["state"] == "TARGET_PROFILED"
+    assert audit["target_profile"] == {
+        "profile_version": "1",
+        "profile_method": "declared_metadata",
+        "target_type": "web_application",
+        "canonical_identifier": "https://staging.example.test/",
+        "interfaces": ["https://staging.example.test/"],
+        "technologies": [],
+        "source_available": False,
+        "authentication": "credential_reference_available",
+        "confidence": 0.75,
+        "profiled_at": audit["target_profile"]["profiled_at"],
+    }
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert [event["event_type"] for event in events] == [
+        "audit.created",
+        "scope.validated",
+        "target.profiled",
+    ]
+
+
+def test_target_profiling_marks_source_repository_as_source_available(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    request = valid_request()
+    request["target"] = {
+        "target_type": "source_repository",
+        "identifier": "https://github.com/example/security-demo/",
+    }
+    request["scope"]["authorized_assets"] = ["https://github.com/example/security-demo"]
+    request["scope"]["excluded_assets"] = []
+    request["authorization"]["allowed_operations"] = ["static_analysis"]
+    request["credential_references"] = []
+    created = client.post("/audits", json=request).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/profile")
+
+    assert response.status_code == 200
+    profile = response.json()["target_profile"]
+    assert profile["source_available"] is True
+    assert profile["authentication"] == "unknown"
+
+
+def test_target_profiling_is_idempotent(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = client.post("/audits", json=valid_request()).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+
+    first = client.post(f"/audits/{created['id']}/profile")
+    second = client.post(f"/audits/{created['id']}/profile")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert [event["event_type"] for event in events].count("target.profiled") == 1
