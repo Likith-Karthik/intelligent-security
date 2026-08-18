@@ -8,6 +8,8 @@
 | Audience | Engineering, Security, Product |
 | Last updated | 15 August 2026 |
 
+Detailed implementation sequence: [Code Flow Plan](./CODE_FLOW_PLAN.md)
+
 ## 1. Overview
 
 The Intelligent Security Audit Orchestrator is a plugin-based platform that uses an AI agent to plan and coordinate security audits across different target types.
