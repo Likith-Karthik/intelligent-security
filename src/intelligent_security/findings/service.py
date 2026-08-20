@@ -6,18 +6,21 @@ from intelligent_security.domain import (
 
 
 class FindingServiceError(Exception):
-    pass
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class FindingService:
     @staticmethod
     def record_validation(audit: Audit, finding: CandidateFinding, request: FindingValidationRequest) -> CandidateFinding:
         if request.evidence_id not in finding.evidence_ids:
-            raise FindingServiceError("Validation evidence must be linked to the candidate finding.")
+            raise FindingServiceError("unlinked_evidence", "Validation evidence must be linked to the candidate finding.")
         if not any(evidence.evidence_id == request.evidence_id for evidence in audit.raw_evidence):
-            raise FindingServiceError("Validation evidence record does not exist in this audit.")
+            raise FindingServiceError("evidence_not_found", "Validation evidence record does not exist in this audit.")
         if finding.state not in {FindingState.CANDIDATE, FindingState.VALIDATION_PENDING, FindingState.INCONCLUSIVE}:
-            raise FindingServiceError("Finding is not eligible for validation in its current state.")
+            raise FindingServiceError("finding_not_eligible", "Finding is not eligible for validation in its current state.")
         target_state = FindingState(request.outcome.value)
         basis = FindingValidationBasis(
             outcome=request.outcome, evidence_id=request.evidence_id, validated_by=request.validated_by,

@@ -673,16 +673,17 @@ def test_finding_validation_rejects_unlinked_evidence(tmp_path):
     fid = c.post(f"/audits/{aid}/findings/correlate").json()["candidate_findings"][0]["finding_id"]
     r = c.post(f"/audits/{aid}/findings/{fid}/validation",
                json={"outcome": "CONFIRMED", "evidence_id": str(uuid4()), "validated_by": "e2e", "basis": "Bad evidence."})
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "validation_rejected"
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "unlinked_evidence"
 
 def test_finding_revalidation_of_confirmed_returns_409(tmp_path):
-    """GAP: Re-validating a CONFIRMED finding should return 409."""
+    """BUG-5: Re-validating a CONFIRMED finding should return 409 with finding_not_eligible."""
     c, aid, eid = _setup_with_obs(tmp_path)
     fid = c.post(f"/audits/{aid}/findings/correlate").json()["candidate_findings"][0]["finding_id"]
     payload = {"outcome": "CONFIRMED", "evidence_id": eid, "validated_by": "e2e", "basis": "Manual validation."}
     assert c.post(f"/audits/{aid}/findings/{fid}/validation", json=payload).status_code == 200
     r = c.post(f"/audits/{aid}/findings/{fid}/validation", json=payload)
-    assert r.status_code == 409, "BUG: re-validating CONFIRMED finding should be 409"
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "finding_not_eligible"
 
 
 # ─── Report ───────────────────────────────────────────────────────────────────

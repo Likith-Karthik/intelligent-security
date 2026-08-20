@@ -226,7 +226,11 @@ def create_app(
         try:
             app.state.finding_service.record_validation(audit, finding, request)
         except FindingServiceError as error:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "validation_rejected", "message": str(error)})
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": error.code, "message": error.message},
+            )
+
         return app.state.audit_repository.save_with_event(
             audit,
             "finding.validation_recorded",
