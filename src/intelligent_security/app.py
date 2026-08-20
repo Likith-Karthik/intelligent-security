@@ -431,7 +431,17 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
         if audit.state == AuditState.PLAN_PROPOSED and audit.audit_plan is not None:
             return audit
-        if audit.state != AuditState.CAPABILITIES_DISCOVERED:
+        if audit.state == AuditState.PLAN_REJECTED:
+            # Allow re-generation after rejection — reset to CAPABILITIES_DISCOVERED first.
+            audit.state = AuditState.CAPABILITIES_DISCOVERED
+            audit.audit_plan = None
+            audit.plan_validation = None
+            app.state.audit_repository.save_with_event(
+                audit,
+                "plan.regeneration_requested",
+                {"previous_state": "PLAN_REJECTED"},
+            )
+        elif audit.state != AuditState.CAPABILITIES_DISCOVERED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Audit plan cannot be generated before capability discovery",

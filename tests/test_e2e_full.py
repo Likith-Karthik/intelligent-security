@@ -425,7 +425,8 @@ def test_plan_validate_requires_proposed(tmp_path):
     assert c.post(f"/audits/{aid}/plan/validate").status_code == 409
 
 def test_plan_validate_time_budget_exceeded(tmp_path):
-    """GAP: When plan is PLAN_REJECTED, there is no way to re-generate a plan."""
+    """After PLAN_REJECTED (e.g. budget exceeded), plan/generate can be retried
+    to recover — the audit resets to CAPABILITIES_DISCOVERED and re-proposes."""
     c = _make_client(tmp_path, _plan1()); req = _base_req(); req["time_budget_seconds"] = 60
     aid = c.post("/audits", json=req).json()["id"]
     for ep in ["/scope/validate", "/profile", "/capabilities/discover", "/plan/generate"]:
@@ -434,6 +435,14 @@ def test_plan_validate_time_budget_exceeded(tmp_path):
     assert r.json()["state"] == "PLAN_REJECTED"
     events = c.get(f"/audits/{aid}/events").json()
     assert any(e["payload"].get("code") == "time_budget_exceeded" for e in events)
+
+    # BUG-3 fix: plan/generate from PLAN_REJECTED recovers the audit
+    # Give the audit a higher time budget by recreating and reusing same client
+    r = c.post(f"/audits/{aid}/plan/generate")
+    assert r.status_code == 200
+    assert r.json()["state"] == "PLAN_PROPOSED"
+    ev_types = [e["event_type"] for e in c.get(f"/audits/{aid}/events").json()]
+    assert "plan.regeneration_requested" in ev_types
 
 def test_human_approval_approve(tmp_path):
     c = _make_client(tmp_path, _plan1()); req = _base_req(); req["approval_policy"] = "human_approval_required"
