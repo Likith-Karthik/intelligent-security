@@ -7,6 +7,7 @@ from intelligent_security.app import create_app
 from intelligent_security.evidence.artifact_store import ArtifactStore
 from intelligent_security.evidence.collector import EvidenceCollector
 from intelligent_security.evidence.normalizer import EvidenceNormalizer
+from intelligent_security.execution.adapters import ContainerCliAdapter
 from intelligent_security.execution.result import AdapterExecutionResult
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfileRegistry
 from intelligent_security.execution.service import ExecutionService
@@ -546,6 +547,60 @@ def test_execute_promotes_dependent_step(tmp_path):
     steps = r.json()["execution_schedule"]["steps"]
     assert steps[0]["status"] == "SUCCEEDED"
     assert steps[1]["status"] == "READY", f"BUG: step 2 is {steps[1]['status']} not READY"
+
+
+def test_container_adapter_supports_network_host_target(tmp_path):
+    """BUG-4: ContainerCliAdapter should authorize network_host targets without requiring https:// URL scheme."""
+    from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
+    from intelligent_security.domain import ScheduledStep
+    import subprocess
+
+    runtime = PluginRuntimeProfile(
+        plugin_id="nmap",
+        adapter="container_cli",
+        runtime_reference="container-config://test-nmap",
+        image_reference="instrumentisto/nmap@sha256:test",
+        allowed_target_hosts=["192.168.1.1"],
+        enabled=True,
+    )
+    audit = _base_req(host="192.168.1.1", target_type="network_host")
+    c = _make_client(tmp_path, _plan1("network.port_discovery"), host="192.168.1.1")
+    aid = c.post("/audits", json=audit).json()["id"]
+    for ep in ["/scope/validate", "/profile"]:
+        assert c.post(f"/audits/{aid}{ep}").status_code == 200
+
+    audit_obj = c.app.state.audit_repository.get(aid)
+    from intelligent_security.domain import ScheduledStepStatus
+    step = ScheduledStep(
+        plan_step_id="step-1",
+        capability="network.port_discovery",
+        contract_version="1",
+        depends_on=[],
+        status=ScheduledStepStatus.READY,
+        estimated_duration_seconds=600,
+        estimated_cost_usd=0.0,
+    )
+    pkg = c.app.state.capability_registry.active_snapshot().package_for_plugin("nmap")
+    assert pkg is not None
+    # package needs execution profile with hostname target_input
+    from intelligent_security.registry.service import PluginExecutionSpec
+    pkg.execution = PluginExecutionSpec(
+        adapter=pkg.manifest.adapter,
+        target_input="hostname",
+        arguments=["-sV", "{{target.hostname}}"],
+    )
+
+
+    received = {}
+    def runner(command, **kwargs):
+        received["command"] = command
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    adapter = ContainerCliAdapter(runner)
+    result = adapter.execute(runtime, audit_obj, step, pkg)
+    assert result.exit_code == 0
+    assert "192.168.1.1" in received["command"]
+
 
 
 # ─── Evidence + Normalisation ─────────────────────────────────────────────────

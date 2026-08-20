@@ -165,6 +165,8 @@ class ExecutionService:
     def _runtime_allows_target(runtime: PluginRuntimeProfile, audit: Audit) -> bool:
         if audit.target_profile is None:
             return False
-        hostname = (urlparse(audit.target_profile.canonical_identifier).hostname or "").lower().rstrip(".")
+        target = audit.target_profile.canonical_identifier
+        parsed = urlparse(target)
+        hostname = (parsed.hostname or target.split("/")[0]).lower().rstrip(".")
         allowed_hosts = {host.lower().rstrip(".") for host in runtime.allowed_target_hosts}
-        return hostname in allowed_hosts
+        return hostname in allowed_hosts or target in allowed_hosts

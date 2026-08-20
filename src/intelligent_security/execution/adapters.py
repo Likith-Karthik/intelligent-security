@@ -103,8 +103,17 @@ class ContainerCliAdapter:
             raise RuntimeError("Validated target profile and scope policy are required.")
         target = audit.target_profile.canonical_identifier
         parsed = urlparse(target)
-        hostname = (parsed.hostname or "").lower().rstrip(".")
+        hostname = (parsed.hostname or target.split("/")[0]).lower().rstrip(".")
         allowed_hosts = {host.lower().rstrip(".") for host in runtime.allowed_target_hosts}
-        if parsed.scheme != "https" or hostname not in audit.scope_policy.network_allowlist or hostname not in allowed_hosts:
-            raise RuntimeError("Container target is not an authorized HTTPS runtime target.")
-        return target if target_input == "url" else hostname
+        network_allowlist = {host.lower().rstrip(".") for host in audit.scope_policy.network_allowlist}
+
+        if target_input == "url":
+            if parsed.scheme != "https" or hostname not in network_allowlist or hostname not in allowed_hosts:
+                raise RuntimeError("Container target is not an authorized HTTPS runtime target.")
+            return target
+
+        if (hostname not in network_allowlist and target not in network_allowlist) or (
+            hostname not in allowed_hosts and target not in allowed_hosts
+        ):
+            raise RuntimeError("Container target is not an authorized runtime target.")
+        return hostname

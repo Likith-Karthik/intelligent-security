@@ -1,42 +1,363 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Security Audit Console</title>
+    <title>Intelligent Security · Audit Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/ui.css" />
   </head>
   <body>
-    <header>
-      <div><p class="eyebrow">INTELLIGENT SECURITY</p><h1>Audit Console</h1></div>
-      <div class="connection"><i></i><span id="connection">Checking API…</span></div>
-    </header>
-    <main>
-      <section class="panel create-panel">
-        <div><p class="eyebrow">NEW ENGAGEMENT</p><h2>Create an audit</h2></div>
-        <form id="create-form">
-          <label>Target type<select name="target_type"><option value="web_application">Web application</option><option value="source_repository">Source repository</option><option value="network_host">Network host</option><option value="llm_application">LLM application</option></select></label>
-          <label>Target identifier<input name="identifier" required placeholder="https://staging.example.test" /><small>Use a URL for web, repository, and LLM targets; a hostname or IP address for a network host.</small></label>
-          <p class="wide muted">Comprehensive mode automatically scopes the audit to this target and enables every compatible non-destructive capability from admitted plugins.</p>
-          <button class="primary wide" type="submit">Create comprehensive audit</button>
-        </form>
-      </section>
-      <section class="workspace">
-        <div class="audit-bar panel"><div><p class="eyebrow">CURRENT AUDIT</p><h2 id="audit-name">No audit selected</h2><p id="audit-target">Create an audit or paste an Audit ID.</p></div><div class="audit-picker"><input id="audit-id" placeholder="Audit ID" /><button id="load-audit">Load</button></div></div>
-        <div id="empty-state" class="panel empty"><h2>Ready when you are</h2><p>Each lifecycle action is enabled only when its preceding state is complete. Plugin selection happens through the API’s capability discovery stage.</p></div>
-        <div id="audit-content" hidden>
-          <section class="panel lifecycle"><div class="section-heading"><div><p class="eyebrow">AUTONOMOUS LIFECYCLE</p><h2 id="audit-state">—</h2><p id="automation-status" class="muted">Waiting for an audit.</p></div><div class="automation-controls"><button id="pause" class="secondary">Pause</button><button id="exit" class="secondary">Exit</button><button id="restart" class="primary">Restart</button></div></div><div id="actions" class="actions"></div></section>
-          <div class="grid">
-            <section class="panel"><p class="eyebrow">PLAN</p><div id="plan" class="content muted">No plan generated.</div></section>
-            <section class="panel"><p class="eyebrow">SCHEDULE & EXECUTION</p><div id="schedule" class="content muted">No scheduled steps.</div></section>
-            <section class="panel"><p class="eyebrow">FINDINGS</p><div id="findings" class="content muted">No findings yet.</div></section>
-            <section class="panel"><p class="eyebrow">ACTIVITY</p><div id="events" class="content muted">No events yet.</div></section>
+    <!-- Top Navigation / Header -->
+    <header class="app-header">
+      <div class="header-container">
+        <div class="brand">
+          <div class="brand-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="m9 12 2 2 4-4"/>
+            </svg>
           </div>
-          <section class="panel report"><div><p class="eyebrow">REPORT</p><p>Reports contain validated, evidence-backed results only.</p></div><div><button id="json-report" class="secondary">Open JSON</button><button id="md-report" class="secondary">Open Markdown</button></div></section>
+          <div>
+            <div class="brand-eyebrow">INTELLIGENT SECURITY</div>
+            <h1 class="brand-title">Audit Console <span class="version-tag">v0.1</span></h1>
+          </div>
         </div>
-      </section>
+
+        <div class="header-actions">
+          <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+            <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="5"/>
+              <line x1="12" y1="1" x2="12" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="23"/>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+              <line x1="1" y1="12" x2="3" y2="12"/>
+              <line x1="21" y1="12" x2="23" y2="12"/>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+            <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+          <div class="connection">
+            <i class="status-dot"></i>
+            <span id="connection">Checking API…</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace Container -->
+    <main class="app-main">
+      <div class="layout-grid">
+        
+        <!-- Left Sidebar: Engagement Creator -->
+        <aside class="sidebar">
+          <section class="panel create-panel">
+            <div class="panel-header">
+              <div class="panel-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="12" y1="8" x2="12" y2="16"/>
+                  <line x1="8" y1="12" x2="16" y2="12"/>
+                </svg>
+              </div>
+              <div>
+                <p class="eyebrow">NEW ENGAGEMENT</p>
+                <h2>Create an audit</h2>
+              </div>
+            </div>
+
+            <form id="create-form" class="form-flow">
+              <div class="form-group">
+                <label for="target_type_select">Target Type</label>
+                <div class="select-wrapper">
+                  <select id="target_type_select" name="target_type">
+                    <option value="web_application">🌐 Web Application</option>
+                    <option value="source_repository">📦 Source Repository</option>
+                    <option value="network_host">🖥️ Network Host</option>
+                    <option value="llm_application">🤖 LLM Application</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="target_identifier">Target Identifier</label>
+                <input id="target_identifier" name="identifier" required placeholder="https://staging.example.test" />
+                <span class="field-hint">Use a URL for web/repo/LLM; a hostname or IP address for a network host.</span>
+              </div>
+
+              <div class="info-callout">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="12" y1="16" x2="12" y2="12"/>
+                  <line x1="12" y1="8" x2="12.01" y2="8"/>
+                </svg>
+                <p><strong>Comprehensive Mode:</strong> Scoped automatically to this target with compatible non-destructive plugins enabled.</p>
+              </div>
+
+              <button class="btn btn-primary btn-block" type="submit" id="create-btn">
+                <span>Create comprehensive audit</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/>
+                  <polyline points="12 5 19 12 12 19"/>
+                </svg>
+              </button>
+            </form>
+
+            <div class="sidebar-features">
+              <div class="feature-pill">
+                <span class="feature-dot"></span> Dynamic capability discovery
+              </div>
+              <div class="feature-pill">
+                <span class="feature-dot"></span> Evidence-backed validation
+              </div>
+              <div class="feature-pill">
+                <span class="feature-dot"></span> Autonomous lifecycle driving
+              </div>
+            </div>
+          </section>
+        </aside>
+
+        <!-- Right Content: Audit Workspace -->
+        <section class="workspace">
+          
+          <!-- Audit Selection Bar -->
+          <div class="panel audit-bar">
+            <div class="audit-info-wrap">
+              <p class="eyebrow">CURRENT AUDIT</p>
+              <div class="audit-title-row">
+                <h2 id="audit-name">No audit selected</h2>
+              </div>
+              <p id="audit-target" class="audit-target-text">Create an audit or paste an Audit ID.</p>
+            </div>
+            
+            <div class="audit-picker">
+              <div class="input-with-icon">
+                <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"/>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <input id="audit-id" placeholder="Paste Audit UUID…" />
+              </div>
+              <button id="load-audit" class="btn btn-secondary">
+                <span>Load</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Empty State (Shown when no audit loaded) -->
+          <div id="empty-state" class="panel empty-panel">
+            <div class="empty-illustration">
+              <div class="empty-icon-ring">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  <circle cx="12" cy="11" r="3"/>
+                </svg>
+              </div>
+            </div>
+            <h3>Ready when you are</h3>
+            <p class="empty-sub">Create a new engagement on the left, or load an existing audit by ID above to inspect its execution lifecycle, findings, and reports.</p>
+            <div class="empty-steps">
+              <div class="step-card">
+                <span class="step-num">1</span>
+                <div>
+                  <strong>Define Target</strong>
+                  <p>Select web, repository, host, or LLM target</p>
+                </div>
+              </div>
+              <div class="step-card">
+                <span class="step-num">2</span>
+                <div>
+                  <strong>Autonomous Pipeline</strong>
+                  <p>AI validates scope, profiles target, and schedules execution</p>
+                </div>
+              </div>
+              <div class="step-card">
+                <span class="step-num">3</span>
+                <div>
+                  <strong>Validated Reports</strong>
+                  <p>Extract corroborated security findings and export JSON/MD</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Active Audit View -->
+          <div id="audit-content" class="audit-content" hidden>
+            
+            <!-- Autonomous Lifecycle Controller -->
+            <section class="panel lifecycle-panel">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">AUTONOMOUS LIFECYCLE</p>
+                  <div class="lifecycle-title-group">
+                    <h2 id="audit-state">—</h2>
+                    <span id="lifecycle-badge" class="badge badge-accent">STAGE</span>
+                  </div>
+                  <p id="automation-status" class="automation-status-text">Waiting for an audit.</p>
+                </div>
+                
+                <div class="automation-controls">
+                  <button id="pause" class="btn btn-control btn-secondary" title="Pause after current step">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <rect x="6" y="4" width="4" height="16"/>
+                      <rect x="14" y="4" width="4" height="16"/>
+                    </svg>
+                    <span>Pause</span>
+                  </button>
+                  <button id="exit" class="btn btn-control btn-secondary" title="Exit execution">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                    </svg>
+                    <span>Exit</span>
+                  </button>
+                  <button id="restart" class="btn btn-control btn-primary" title="Resume from safe state">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <polyline points="23 4 23 10 17 10"/>
+                      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                    </svg>
+                    <span>Restart</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Pipeline Stage Visualizer -->
+              <div class="pipeline-stepper" id="pipeline-stepper">
+                <div class="pipeline-step" data-stage="CREATED"><span class="step-indicator"></span><span class="step-name">Scope</span></div>
+                <div class="pipeline-step" data-stage="SCOPE_VALIDATED"><span class="step-indicator"></span><span class="step-name">Profile</span></div>
+                <div class="pipeline-step" data-stage="TARGET_PROFILED"><span class="step-indicator"></span><span class="step-name">Discover</span></div>
+                <div class="pipeline-step" data-stage="CAPABILITIES_DISCOVERED"><span class="step-indicator"></span><span class="step-name">Plan</span></div>
+                <div class="pipeline-step" data-stage="PLAN_PROPOSED"><span class="step-indicator"></span><span class="step-name">Validate</span></div>
+                <div class="pipeline-step" data-stage="PLAN_APPROVED"><span class="step-indicator"></span><span class="step-name">Schedule</span></div>
+                <div class="pipeline-step" data-stage="PLAN_SCHEDULED"><span class="step-indicator"></span><span class="step-name">Execute</span></div>
+              </div>
+
+              <div id="actions" class="actions-container"></div>
+            </section>
+
+            <!-- 4-Section Dashboard Grid -->
+            <div class="dashboard-grid">
+              
+              <!-- Plan Panel -->
+              <section class="panel data-panel">
+                <div class="card-title-bar">
+                  <div class="title-with-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                      <polyline points="2 17 12 22 22 17"></polyline>
+                      <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                    <p class="eyebrow">AUDIT PLAN</p>
+                  </div>
+                  <span id="plan-count" class="count-tag">0 steps</span>
+                </div>
+                <div id="plan" class="content scroll-box">
+                  <p class="muted">No plan generated.</p>
+                </div>
+              </section>
+
+              <!-- Schedule & Execution Panel -->
+              <section class="panel data-panel">
+                <div class="card-title-bar">
+                  <div class="title-with-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    <p class="eyebrow">SCHEDULE & EXECUTION</p>
+                  </div>
+                  <span id="schedule-count" class="count-tag">0 steps</span>
+                </div>
+                <div id="schedule" class="content scroll-box">
+                  <p class="muted">No scheduled steps.</p>
+                </div>
+              </section>
+
+              <!-- Findings Panel -->
+              <section class="panel data-panel">
+                <div class="card-title-bar">
+                  <div class="title-with-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                      <line x1="12" y1="9" x2="12" y2="13"></line>
+                      <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                    <p class="eyebrow">FINDINGS</p>
+                  </div>
+                  <span id="findings-count" class="count-tag">0 findings</span>
+                </div>
+                <div id="findings" class="content scroll-box">
+                  <p class="muted">No findings yet.</p>
+                </div>
+              </section>
+
+              <!-- Activity Feed Panel -->
+              <section class="panel data-panel">
+                <div class="card-title-bar">
+                  <div class="title-with-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                    <p class="eyebrow">ACTIVITY TIMELINE</p>
+                  </div>
+                  <span id="events-count" class="count-tag">0 events</span>
+                </div>
+                <div id="events" class="content scroll-box">
+                  <p class="muted">No events yet.</p>
+                </div>
+              </section>
+
+            </div>
+
+            <!-- Report Export Bar -->
+            <section class="panel report-panel">
+              <div class="report-info">
+                <div class="report-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                    <polyline points="10 9 9 9 8 9"></polyline>
+                  </svg>
+                </div>
+                <div>
+                  <p class="eyebrow">FINAL REPORT</p>
+                  <p class="report-desc">Reports contain validated, evidence-backed security findings and audit telemetry.</p>
+                </div>
+              </div>
+              <div class="report-actions">
+                <button id="json-report" class="btn btn-secondary">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="16 18 22 12 16 6"/>
+                    <polyline points="8 6 2 12 8 18"/>
+                  </svg>
+                  <span>Open JSON</span>
+                </button>
+                <button id="md-report" class="btn btn-secondary">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                    <polyline points="7 15 7 9 10 12 13 9 13 15"/>
+                    <polyline points="17 9 17 15 19 13"/>
+                  </svg>
+                  <span>Open Markdown</span>
+                </button>
+              </div>
+            </section>
+
+          </div>
+        </section>
+      </div>
     </main>
-    <div id="toast" role="status"></div>
+
+    <!-- Toast Notification -->
+    <div id="toast" role="status" class="toast"></div>
+
     <script src="/ui.js"></script>
   </body>
 </html>
