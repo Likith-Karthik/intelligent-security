@@ -461,8 +461,13 @@ def create_app(
                 detail={"code": "model_profile_unavailable", "message": str(error)},
             )
         except ModelGatewayError as error:
+            status_code = (
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if error.code in {"credential_unavailable", "unsupported_credential_reference"}
+                else status.HTTP_502_BAD_GATEWAY
+            )
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
+                status_code=status_code,
                 detail={"code": error.code, "message": error.message},
             )
         except PlanningError as error:

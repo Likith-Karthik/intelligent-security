@@ -394,19 +394,17 @@ def test_plan_gen_normalizes_numeric_ids(tmp_path):
     r = c.post(f"/audits/{aid}/plan/generate"); assert r.status_code == 200
     assert r.json()["audit_plan"]["steps"][0]["id"] == "1"
 
-def test_plan_gen_no_credentials_returns_5xx(tmp_path):
-    """GAP: With no model credentials configured, plan/generate returns 502 with
-    credential_unavailable (not 503 model_profile_unavailable). This means the
-    error code depends on whether a profile is found vs whether credentials exist."""
+def test_plan_gen_no_credentials_returns_503(tmp_path):
+    """BUG-1: With no model credentials configured in the environment, plan/generate
+    returns 503 Service Unavailable with code credential_unavailable."""
     app = create_app(database_path=str(tmp_path / "db.db"))
     c = TestClient(app); aid = c.post("/audits", json=_base_req()).json()["id"]
     for ep in ["/scope/validate", "/profile", "/capabilities/discover"]:
         assert c.post(f"/audits/{aid}{ep}").status_code == 200
     r = c.post(f"/audits/{aid}/plan/generate")
-    # Without credentials the gateway fails with 502 credential_unavailable (not 503).
-    # This is a gap: the error code is not consistent with the no-profile case.
-    assert r.status_code in (502, 503)
-    assert r.json()["detail"]["code"] in ("model_profile_unavailable", "credential_unavailable")
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "credential_unavailable"
+
 
 
 # ─── Flow 6: Plan validation + approval ───────────────────────────────────────
