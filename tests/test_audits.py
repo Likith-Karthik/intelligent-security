@@ -352,13 +352,13 @@ def test_completed_scope_and_profile_stages_remain_readable_after_discovery(tmp_
     assert client.post(f"/audits/{created['id']}/profile").status_code == 200
     assert client.post(f"/audits/{created['id']}/capabilities/discover").status_code == 200
 
-    scope = client.post(f"/audits/{created['id']}/scope/validate")
-    profile = client.post(f"/audits/{created['id']}/profile")
-
-    assert scope.status_code == 200
-    assert profile.status_code == 200
-    assert scope.json()["state"] == "CAPABILITIES_DISCOVERED"
-    assert profile.json()["state"] == "CAPABILITIES_DISCOVERED"
+    # Verify completed stages are preserved on the audit state via GET (read endpoint).
+    # Note: scope/validate and profile are mutation endpoints — calling them again after
+    # their respective states have passed now correctly returns 409.
+    audit = client.get(f"/audits/{created['id']}").json()
+    assert audit["state"] == "CAPABILITIES_DISCOVERED"
+    assert audit["scope_policy"] is not None
+    assert audit["target_profile"] is not None
 
 
 def test_capability_discovery_loads_a_new_manifest_without_code_changes(tmp_path) -> None:

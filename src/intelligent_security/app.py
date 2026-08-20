@@ -129,11 +129,7 @@ def create_app(
         audit = app.state.audit_repository.get(audit_id)
         if audit is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
-        if audit.scope_policy is not None and audit.state in {
-            AuditState.SCOPE_VALIDATED,
-            AuditState.TARGET_PROFILED,
-            AuditState.CAPABILITIES_DISCOVERED,
-        }:
+        if audit.scope_policy is not None and audit.state == AuditState.SCOPE_VALIDATED:
             return audit
         if audit.state != AuditState.CREATED:
             raise HTTPException(
