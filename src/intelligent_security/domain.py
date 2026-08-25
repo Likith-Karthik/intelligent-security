@@ -30,6 +30,27 @@ class AuditState(str, Enum):
     PLAN_SCHEDULED = "PLAN_SCHEDULED"
 
 
+class PipelineStage(str, Enum):
+    PREFLIGHT = "PREFLIGHT"
+    RECON = "RECON"
+    PLAN = "PLAN"
+    EXECUTE = "EXECUTE"
+    VALIDATE = "VALIDATE"
+    REPORT = "REPORT"
+    OFFENSIVE = "OFFENSIVE"
+    CLOSED = "CLOSED"
+
+
+class StageStatus(str, Enum):
+    PENDING = "PENDING"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+    SKIPPED = "SKIPPED"
+
+
 class AuditOperation(str, Enum):
     STATIC_ANALYSIS = "static_analysis"
     WEB_SCAN = "web_scan"
@@ -103,9 +124,21 @@ class PluginAdapter(str, Enum):
     LLM_TESTING = "llm_testing"
 
 
+class CapabilityStage(str, Enum):
+    """The audit-pipeline compartment a capability is allowed to serve."""
+
+    RECON = "recon"
+    EXECUTE = "execute"
+    VALIDATE = "validate"
+    OFFENSIVE = "offensive"
+
+
 class PluginCapability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     capability: str = Field(..., min_length=3, max_length=200)
     contract_version: str = Field(default="1", min_length=1, max_length=50)
+    stage: CapabilityStage
     description: str = Field(..., min_length=1, max_length=1000)
     target_types: List[str] = Field(..., min_length=1, max_length=50)
     required_operation: AuditOperation
@@ -171,6 +204,7 @@ class CapabilityCandidate(BaseModel):
     rank: int
     capability: str
     contract_version: str = "1"
+    stage: CapabilityStage
     description: str
     plugin_id: str
     plugin_version: str
@@ -196,6 +230,51 @@ class CapabilityDiscovery(BaseModel):
     candidates: List[CapabilityCandidate]
     gaps: List[CapabilityGap]
     discovered_at: datetime
+
+
+class ReconPolicy(BaseModel):
+    """Versioned, non-destructive bounds for deterministic recon selection."""
+
+    policy_version: str = Field(default="recon-policy/v1", min_length=1, max_length=100)
+    allowed_operations: List[AuditOperation] = Field(
+        default_factory=lambda: [
+            AuditOperation.PORT_DISCOVERY,
+            AuditOperation.WEB_SCAN,
+            AuditOperation.STATIC_ANALYSIS,
+        ],
+        min_length=1,
+        max_length=20,
+    )
+    max_steps: int = Field(default=5, ge=1, le=100)
+    max_concurrency: int = Field(default=2, ge=1, le=20)
+    max_duration_seconds: int = Field(default=900, ge=1, le=604800)
+    max_cost_usd: float = Field(default=5.0, ge=0, le=1000000)
+
+
+class ReconPlanGap(BaseModel):
+    capability_family: str = Field(..., min_length=1, max_length=200)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class ReconPlanStep(BaseModel):
+    step_id: str = Field(..., min_length=1, max_length=100)
+    capability: str = Field(..., min_length=3, max_length=200)
+    contract_version: str = Field(default="1", min_length=1, max_length=50)
+    depends_on: List[str] = Field(default_factory=list, max_length=100)
+    rationale_codes: List[str] = Field(..., min_length=1, max_length=20)
+
+
+class ReconPlan(BaseModel):
+    plan_version: str = Field(default="recon-plan/v1", min_length=1, max_length=100)
+    policy_version: str = Field(..., min_length=1, max_length=100)
+    registry_snapshot_id: str = Field(..., min_length=1, max_length=200)
+    target_type: str = Field(..., min_length=1, max_length=100)
+    max_concurrency: int = Field(..., ge=1, le=20)
+    reserved_duration_seconds: int = Field(..., ge=0)
+    reserved_cost_usd: float = Field(..., ge=0)
+    steps: List[ReconPlanStep] = Field(default_factory=list, max_length=100)
+    coverage_gaps: List[ReconPlanGap] = Field(default_factory=list, max_length=100)
+    generated_at: datetime
 
 
 class ModelProfile(BaseModel):
@@ -532,6 +611,46 @@ class PluginExecution(BaseModel):
     error_message: Optional[str] = None
 
 
+class PipelineStageProgress(BaseModel):
+    stage: PipelineStage
+    status: StageStatus = StageStatus.PENDING
+    attempt_count: int = Field(default=0, ge=0, le=1000)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    blocked_at: Optional[datetime] = None
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class AuditPipeline(BaseModel):
+    """Versioned Stage 2 progress, separate from the legacy audit state machine."""
+
+    pipeline_version: str = Field(default="2", min_length=1, max_length=50)
+    current_stage: PipelineStage = PipelineStage.PREFLIGHT
+    stages: List[PipelineStageProgress] = Field(..., min_length=1, max_length=20)
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def new(cls, created_at: datetime) -> "AuditPipeline":
+        return cls(
+            current_stage=PipelineStage.PREFLIGHT,
+            stages=[
+                PipelineStageProgress(stage=stage, status=StageStatus.PENDING)
+                for stage in PipelineStage
+            ],
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+
+class PipelineTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stage: PipelineStage
+    status: StageStatus
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
 class AuditCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -561,10 +680,15 @@ class Audit(BaseModel):
     approval_policy: str
     state: AuditState
     created_at: datetime
+    pipeline: Optional[AuditPipeline] = None
     scope_policy: Optional[ScopePolicy] = None
     scope_validated_at: Optional[datetime] = None
     target_profile: Optional[TargetProfile] = None
     target_profiled_at: Optional[datetime] = None
+    recon_capability_discovery: Optional[CapabilityDiscovery] = None
+    recon_capabilities_discovered_at: Optional[datetime] = None
+    recon_plan: Optional[ReconPlan] = None
+    recon_plan_created_at: Optional[datetime] = None
     capability_discovery: Optional[CapabilityDiscovery] = None
     capabilities_discovered_at: Optional[datetime] = None
     planner_model_profile: Optional[str] = None

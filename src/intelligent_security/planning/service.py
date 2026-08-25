@@ -74,6 +74,7 @@ class AuditPlanner:
                 {
                     "capability": candidate.capability,
                     "contract_version": candidate.contract_version,
+                    "stage": candidate.stage.value,
                     "description": candidate.description,
                     "required_operation": candidate.required_operation.value,
                     "required_inputs": candidate.required_inputs,

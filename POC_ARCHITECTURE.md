@@ -250,6 +250,7 @@ enabled: true
 
 capabilities:
   - id: web.vulnerability_scan
+    stage: execute
     contract_version: 1
     description: Scan an authorized web target with approved templates.
     target_types: [web_application, api]

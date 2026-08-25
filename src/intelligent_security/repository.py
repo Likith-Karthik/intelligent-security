@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import UUID, uuid4
 
-from .domain import Audit, AuditCreateRequest, AuditEvent, AuditState
+from .domain import Audit, AuditCreateRequest, AuditEvent, AuditPipeline, AuditState
 
 
 class AuditRepository:
@@ -55,6 +55,7 @@ class AuditRepository:
             planner_model_profile=request.planner_model_profile,
             state=AuditState.CREATED,
             created_at=created_at,
+            pipeline=AuditPipeline.new(created_at),
         )
         payload = audit.model_dump_json()
         event = AuditEvent(

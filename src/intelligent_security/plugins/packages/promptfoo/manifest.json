@@ -5,5 +5,5 @@
   "adapter": "llm_testing",
   "enabled": true,
   "health": "declared_healthy",
-  "capabilities": [{"capability": "llm.prompt_injection_test", "description": "Run prompt-injection tests against an authorized LLM application.", "target_types": ["llm_application"], "required_operation": "llm_red_team", "required_inputs": ["target_profile", "scope_policy"], "estimated_duration_seconds": 900, "estimated_cost_usd": 5, "reliability": 0.8}]
+  "capabilities": [{"capability": "llm.prompt_injection_test", "stage": "execute", "description": "Run prompt-injection tests against an authorized LLM application.", "target_types": ["llm_application"], "required_operation": "llm_red_team", "required_inputs": ["target_profile", "scope_policy"], "estimated_duration_seconds": 900, "estimated_cost_usd": 5, "reliability": 0.8}]
 }

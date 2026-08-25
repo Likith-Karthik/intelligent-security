@@ -14,7 +14,18 @@ from intelligent_security.evidence.normalizer import EvidenceNormalizer
 from intelligent_security.findings.correlator import AIFindingCorrelator
 from intelligent_security.reporting.generator import ReportGenerator
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
+from intelligent_security.domain import (
+    AuditOperation,
+    CapabilityCandidate,
+    CapabilityDiscovery,
+    CapabilityStage,
+    PipelineStage,
+    PluginHealth,
+    ReconPolicy,
+    StageStatus,
+)
 from intelligent_security.planning.service import AuditPlanner
+from intelligent_security.recon.planner import ReconPlanner, ReconPlanningError
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +71,84 @@ def valid_request() -> dict:
     }
 
 
+def write_recon_package(manifest_directory, plugin_id="test-recon") -> None:
+    package_directory = manifest_directory / plugin_id
+    package_directory.mkdir(parents=True)
+    (package_directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "plugin_id": plugin_id,
+                "plugin_version": "1",
+                "kind": "native_security_tool",
+                "adapter": "container_cli",
+                "enabled": True,
+                "health": "declared_healthy",
+                "capabilities": [
+                    {
+                        "capability": "network.port_discovery",
+                        "contract_version": "1",
+                        "stage": "recon",
+                        "description": "Discover exposed ports on an authorized host.",
+                        "target_types": ["web_application"],
+                        "required_operation": "port_discovery",
+                        "required_inputs": ["target_profile", "scope_policy"],
+                        "estimated_duration_seconds": 60,
+                        "estimated_cost_usd": 0,
+                        "reliability": 0.9,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (package_directory / "execution.json").write_text(
+        json.dumps(
+            {
+                "adapter": "container_cli",
+                "target_input": "hostname",
+                "arguments": ["scan", "{{target.hostname}}"],
+                "output_format": "jsonl",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def prepare_recon_audit(client, request=None) -> dict:
+    created = client.post("/audits", json=request or valid_request()).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/profile").status_code == 200
+    transition_url = f"/audits/{created['id']}/pipeline/transition"
+    assert client.post(transition_url, json={"stage": "PREFLIGHT", "status": "RUNNING"}).status_code == 200
+    assert client.post(transition_url, json={"stage": "PREFLIGHT", "status": "SUCCEEDED"}).status_code == 200
+    assert client.post(transition_url, json={"stage": "RECON", "status": "READY"}).status_code == 200
+    return created
+
+
+def recon_request() -> dict:
+    request = valid_request()
+    request["authorization"]["allowed_operations"] = ["port_discovery"]
+    return request
+
+
+def recon_candidate(capability, rank=1, duration=60, cost=0, operation=AuditOperation.PORT_DISCOVERY) -> CapabilityCandidate:
+    return CapabilityCandidate(
+        rank=rank,
+        capability=capability,
+        contract_version="1",
+        stage=CapabilityStage.RECON,
+        description="Test recon capability.",
+        plugin_id="test-recon-{}".format(rank),
+        plugin_version="1",
+        required_operation=operation,
+        required_inputs=["target_profile", "scope_policy"],
+        estimated_duration_seconds=duration,
+        estimated_cost_usd=cost,
+        reliability=0.9,
+        health=PluginHealth.DECLARED_HEALTHY,
+    )
+
+
 def test_create_audit_persists_request_and_emits_event(tmp_path) -> None:
     client = TestClient(create_app(str(tmp_path / "audits.db")))
 
@@ -78,6 +167,300 @@ def test_create_audit_persists_request_and_emits_event(tmp_path) -> None:
     assert events.status_code == 200
     assert events.json()[0]["event_type"] == "audit.created"
     assert events.json()[0]["payload"] == {"state": "CREATED"}
+
+
+def test_new_audit_has_a_versioned_pipeline(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+
+    created = client.post("/audits", json=valid_request())
+
+    assert created.status_code == 201
+    pipeline = created.json()["pipeline"]
+    assert pipeline["pipeline_version"] == "2"
+    assert pipeline["current_stage"] == "PREFLIGHT"
+    assert {item["stage"] for item in pipeline["stages"]} == {stage.value for stage in PipelineStage}
+    assert all(item["status"] == "PENDING" for item in pipeline["stages"])
+
+
+def test_pipeline_transition_is_idempotent_and_preserves_stage1_audit_state(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = client.post("/audits", json=valid_request()).json()
+    transition_url = f"/audits/{created['id']}/pipeline/transition"
+
+    started = client.post(
+        transition_url, json={"stage": "PREFLIGHT", "status": "RUNNING"}
+    )
+    repeated = client.post(
+        transition_url, json={"stage": "PREFLIGHT", "status": "RUNNING"}
+    )
+
+    assert started.status_code == 200
+    assert repeated.status_code == 200
+    assert repeated.json()["state"] == "CREATED"
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert [event["event_type"] for event in events].count("pipeline.stage_started") == 1
+
+    assert client.post(
+        transition_url, json={"stage": "PREFLIGHT", "status": "SUCCEEDED"}
+    ).status_code == 200
+    recon_ready = client.post(
+        transition_url, json={"stage": "RECON", "status": "READY"}
+    )
+    assert recon_ready.status_code == 200
+    assert recon_ready.json()["pipeline"]["current_stage"] == "RECON"
+    assert next(
+        item for item in recon_ready.json()["pipeline"]["stages"] if item["stage"] == "RECON"
+    )["status"] == "READY"
+
+
+def test_pipeline_rejects_illegal_stage_skips(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = client.post("/audits", json=valid_request()).json()
+
+    response = client.post(
+        f"/audits/{created['id']}/pipeline/transition",
+        json={"stage": "EXECUTE", "status": "READY"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "invalid_pipeline_transition"
+
+
+def test_stage1_audit_without_pipeline_has_a_read_only_compatibility_view(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = client.post("/audits", json=valid_request()).json()
+    repository = client.app.state.audit_repository
+    with repository._connection() as connection:
+        row = connection.execute("SELECT payload FROM audits WHERE id = ?", (created["id"],)).fetchone()
+        payload = json.loads(row["payload"])
+        payload.pop("pipeline")
+        connection.execute(
+            "UPDATE audits SET payload = ? WHERE id = ?", (json.dumps(payload), created["id"]))
+
+    audit = client.get(f"/audits/{created['id']}")
+    pipeline = client.get(f"/audits/{created['id']}/pipeline")
+
+    assert audit.status_code == 200
+    assert audit.json()["pipeline"] is None
+    assert pipeline.status_code == 200
+    assert pipeline.json()["pipeline_version"] == "stage1-compat/v1"
+    assert pipeline.json()["current_stage"] == "PREFLIGHT"
+    assert pipeline.json()["stages"][0]["status"] == StageStatus.READY.value
+
+
+def test_recon_discovery_persists_only_executable_recon_capabilities(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    runtimes = tmp_path / "runtimes.json"
+    runtimes.write_text(
+        json.dumps({"plugins": [{
+            "plugin_id": "test-recon",
+            "adapter": "container_cli",
+            "runtime_reference": "container-config://test-recon",
+            "allowed_target_hosts": ["staging.example.test"],
+            "enabled": True,
+        }]}),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifests),
+        plugin_runtime_profiles_path=str(runtimes),
+    ))
+
+    class ExplodingAdapter:
+        def execute(self, *args, **kwargs):
+            raise AssertionError("Recon discovery must not execute a plugin")
+
+    client.app.state.execution_service.adapters["container_cli"] = ExplodingAdapter()
+    created = prepare_recon_audit(client, recon_request())
+
+    response = client.post(f"/audits/{created['id']}/recon/capabilities/discover")
+
+    assert response.status_code == 200
+    discovery = response.json()["recon_capability_discovery"]
+    assert [candidate["capability"] for candidate in discovery["candidates"]] == ["network.port_discovery"]
+    assert all(candidate["stage"] == "recon" for candidate in discovery["candidates"])
+    assert response.json()["capability_discovery"] is None
+    assert response.json()["recon_capabilities_discovered_at"] == discovery["discovered_at"]
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "recon.capabilities_discovered"
+
+    assert client.post(f"/audits/{created['id']}/recon/capabilities/discover").status_code == 200
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert [event["event_type"] for event in events].count("recon.capabilities_discovered") == 1
+
+
+def test_recon_discovery_excludes_plugin_without_a_runtime_profile(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    client = TestClient(create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifests),
+        plugin_runtime_profiles_path=str(tmp_path / "missing-runtimes.json"),
+    ))
+    created = prepare_recon_audit(client, recon_request())
+
+    response = client.post(f"/audits/{created['id']}/recon/capabilities/discover")
+
+    assert response.status_code == 200
+    discovery = response.json()["recon_capability_discovery"]
+    assert discovery["candidates"] == []
+    assert discovery["gaps"][0]["operation"] == "port_discovery"
+
+
+def test_recon_discovery_excludes_runtime_outside_target_allowlist(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    runtimes = tmp_path / "runtimes.json"
+    runtimes.write_text(
+        json.dumps({"plugins": [{
+            "plugin_id": "test-recon",
+            "adapter": "container_cli",
+            "runtime_reference": "container-config://test-recon",
+            "allowed_target_hosts": ["other.example.test"],
+            "enabled": True,
+        }]}),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifests),
+        plugin_runtime_profiles_path=str(runtimes),
+    ))
+    created = prepare_recon_audit(client, recon_request())
+
+    response = client.post(f"/audits/{created['id']}/recon/capabilities/discover")
+
+    assert response.status_code == 200
+    assert response.json()["recon_capability_discovery"]["candidates"] == []
+
+
+def test_recon_discovery_requires_the_recon_pipeline_stage(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    client = TestClient(create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifests),
+    ))
+    created = client.post("/audits", json=recon_request()).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/profile").status_code == 200
+
+    response = client.post(f"/audits/{created['id']}/recon/capabilities/discover")
+
+    assert response.status_code == 409
+    assert "RECON stage" in response.json()["detail"]
+
+
+def test_recon_plan_is_deterministic_and_contains_capability_contracts_only(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    runtimes = tmp_path / "runtimes.json"
+    runtimes.write_text(
+        json.dumps({"plugins": [{
+            "plugin_id": "test-recon", "adapter": "container_cli",
+            "runtime_reference": "container-config://test-recon",
+            "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+        }]}), encoding="utf-8"
+    )
+    client = TestClient(create_app(
+        str(tmp_path / "audits.db"), plugin_manifest_directory=str(manifests),
+        plugin_runtime_profiles_path=str(runtimes),
+    ))
+    created = prepare_recon_audit(client, recon_request())
+    assert client.post(f"/audits/{created['id']}/recon/capabilities/discover").status_code == 200
+
+    first = client.post(f"/audits/{created['id']}/recon/plan")
+    second = client.post(f"/audits/{created['id']}/recon/plan")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    plan = first.json()["recon_plan"]
+    assert plan["policy_version"] == "recon-policy/v1"
+    assert plan["steps"] == [{
+        "step_id": "recon-01", "capability": "network.port_discovery", "contract_version": "1",
+        "depends_on": [],
+        "rationale_codes": ["baseline_recon", "highest_ranked_contract", "policy_allowed"],
+    }]
+    assert "plugin_id" not in plan["steps"][0]
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert [event["event_type"] for event in events].count("recon.plan_created") == 1
+
+
+def test_recon_planner_respects_dependencies_and_budget_limits(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = prepare_recon_audit(client, recon_request())
+    audit = client.app.state.audit_repository.get(created["id"])
+    audit.recon_capability_discovery = CapabilityDiscovery(
+        registry_version="1",
+        registry_snapshot_id="registry-test",
+        target_type="web_application",
+        candidates=[
+            recon_candidate("network.service_fingerprint", rank=1, duration=50),
+            recon_candidate("network.port_discovery", rank=2, duration=50),
+            recon_candidate("web.http_fingerprint", rank=3, duration=50),
+        ],
+        gaps=[],
+        discovered_at=audit.created_at,
+    )
+    policy = ReconPolicy(max_steps=2, max_duration_seconds=100, max_cost_usd=1)
+
+    plan = ReconPlanner().create(audit, policy)
+
+    assert [step.capability for step in plan.steps] == [
+        "network.port_discovery", "network.service_fingerprint"
+    ]
+    assert plan.steps[1].depends_on == ["recon-01"]
+    assert plan.reserved_duration_seconds == 100
+    assert plan.reserved_cost_usd == 0
+    assert any(gap.capability_family == "web.http_fingerprint" for gap in plan.coverage_gaps)
+
+    repeated = ReconPlanner().create(audit, policy)
+    assert repeated.steps == plan.steps
+    assert repeated.coverage_gaps == plan.coverage_gaps
+
+
+def test_recon_planner_enforces_step_time_and_cost_limits(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = prepare_recon_audit(client, recon_request())
+    audit = client.app.state.audit_repository.get(created["id"])
+    audit.recon_capability_discovery = CapabilityDiscovery(
+        registry_version="1", registry_snapshot_id="registry-test", target_type="web_application",
+        candidates=[
+            recon_candidate("network.port_discovery", rank=1, duration=10, cost=0),
+            recon_candidate("web.http_fingerprint", rank=2, duration=10, cost=2),
+            recon_candidate("network.dns_enumeration", rank=3, duration=200, cost=0),
+        ], gaps=[], discovered_at=audit.created_at,
+    )
+
+    step_limited = ReconPlanner().create(audit, ReconPolicy(max_steps=1, max_duration_seconds=1000, max_cost_usd=10))
+    budget_limited = ReconPlanner().create(audit, ReconPolicy(max_steps=5, max_duration_seconds=100, max_cost_usd=1))
+
+    assert len(step_limited.steps) == 1
+    assert any("step limit" in gap.reason for gap in step_limited.coverage_gaps)
+    assert len(budget_limited.steps) == 1
+    assert any("cost" in gap.reason for gap in budget_limited.coverage_gaps)
+    assert any("time" in gap.reason for gap in budget_limited.coverage_gaps)
+
+
+def test_recon_planner_rejects_offensive_catalog_entries(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = prepare_recon_audit(client, recon_request())
+    audit = client.app.state.audit_repository.get(created["id"])
+    audit.recon_capability_discovery = CapabilityDiscovery(
+        registry_version="1",
+        registry_snapshot_id="registry-test",
+        target_type="web_application",
+        candidates=[recon_candidate("web.exploit", operation=AuditOperation.EXPLOIT)],
+        gaps=[],
+        discovered_at=audit.created_at,
+    )
+
+    with pytest.raises(ReconPlanningError, match="offensive or destructive") as error:
+        ReconPlanner().create(audit, ReconPolicy())
+
+    assert error.value.code == "unsafe_recon_capability"
 
 
 def test_create_audit_rejects_invalid_scope() -> None:
@@ -293,7 +676,7 @@ def test_capability_discovery_matches_web_scan_to_nuclei(tmp_path) -> None:
     assert discovery["gaps"] == []
     scan = next(item for item in discovery["candidates"] if item["capability"] == "web.vulnerability_scan")
     assert scan == {
-        "rank": 1, "capability": "web.vulnerability_scan", "contract_version": "1",
+        "rank": 1, "capability": "web.vulnerability_scan", "contract_version": "1", "stage": "execute",
         "description": "Run template-based vulnerability scans against an authorized web application or API.",
         "plugin_id": "nuclei", "plugin_version": "1", "adapter": "container_cli",
         "required_operation": "web_scan", "required_inputs": ["target_profile", "scope_policy"],
@@ -301,9 +684,108 @@ def test_capability_discovery_matches_web_scan_to_nuclei(tmp_path) -> None:
         "health": "declared_healthy", "validation_for": [],
     }
     validation = next(item for item in discovery["candidates"] if item["capability"] == "web.vulnerability.validate")
+    assert validation["stage"] == "validate"
     assert validation["validation_for"] == ["web.vulnerability_scan"]
     events = client.get(f"/audits/{created['id']}/events").json()
     assert events[-1]["event_type"] == "capabilities.discovered"
+
+
+def test_registry_discovery_filters_capabilities_by_stage(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = client.post("/audits", json=valid_request()).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/profile").status_code == 200
+    audit = client.app.state.audit_repository.get(created["id"])
+
+    discovery = client.app.state.capability_registry.discover(
+        audit, stages={CapabilityStage.VALIDATE}
+    )
+
+    assert [candidate.capability for candidate in discovery.candidates] == ["web.vulnerability.validate"]
+    assert discovery.candidates[0].stage == CapabilityStage.VALIDATE
+
+
+def test_registry_rejects_missing_or_unknown_capability_stage(tmp_path) -> None:
+    manifest_directory = tmp_path / "manifests"
+    manifest_directory.mkdir()
+    manifest_path = manifest_directory / "scanner.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "plugin_id": "custom-scanner",
+                "plugin_version": "1",
+                "capabilities": [{
+                    "capability": "web.custom_scan",
+                    "description": "Scan an authorized web application.",
+                    "target_types": ["web_application"],
+                    "required_operation": "web_scan",
+                    "estimated_duration_seconds": 60,
+                    "estimated_cost_usd": 0,
+                    "reliability": 0.8,
+                }],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifest_directory),
+        registry_admin_token="test-admin-token",
+    )
+    client = TestClient(app)
+
+    missing_stage = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    )
+    assert missing_stage.status_code == 422
+    assert "stage" in missing_stage.json()["detail"]["message"]
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["capabilities"][0]["stage"] = "not-a-stage"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    unknown_stage = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    )
+    assert unknown_stage.status_code == 422
+    assert "stage" in unknown_stage.json()["detail"]["message"]
+
+
+def test_registry_snapshot_changes_when_capability_stage_changes(tmp_path) -> None:
+    manifest_directory = tmp_path / "manifests"
+    manifest_directory.mkdir()
+    manifest_path = manifest_directory / "scanner.json"
+    manifest = {
+        "plugin_id": "custom-scanner",
+        "plugin_version": "1",
+        "capabilities": [{
+            "capability": "web.custom_scan",
+            "stage": "recon",
+            "description": "Scan an authorized web application.",
+            "target_types": ["web_application"],
+            "required_operation": "web_scan",
+            "estimated_duration_seconds": 60,
+            "estimated_cost_usd": 0,
+            "reliability": 0.8,
+        }],
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    app = create_app(
+        str(tmp_path / "audits.db"),
+        plugin_manifest_directory=str(manifest_directory),
+        registry_admin_token="test-admin-token",
+    )
+    client = TestClient(app)
+    first = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    ).json()["snapshot_id"]
+
+    manifest["capabilities"][0]["stage"] = "execute"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    second = client.post(
+        "/admin/plugins/refresh", headers={"X-Plugin-Registry-Token": "test-admin-token"}
+    ).json()["snapshot_id"]
+
+    assert second != first
 
 
 def test_capability_discovery_reports_gap_when_no_plugin_is_available(tmp_path) -> None:
@@ -375,6 +857,7 @@ def test_capability_discovery_loads_a_new_manifest_without_code_changes(tmp_path
                 "capabilities": [
                     {
                         "capability": "web.custom_scan",
+                        "stage": "execute",
                         "description": "Custom web scan for an authorized target.",
                         "target_types": ["web_application"],
                         "required_operation": "web_scan",
@@ -438,6 +921,7 @@ def test_package_removal_updates_new_discoveries_after_refresh(tmp_path) -> None
                 "health": "declared_healthy",
                 "capabilities": [{
                     "capability": "web.removable_scan",
+                    "stage": "execute",
                     "description": "A removable package capability.",
                     "target_types": ["web_application"],
                     "required_operation": "web_scan",
@@ -905,6 +1389,7 @@ def test_registry_refresh_is_authorized_and_atomically_updates_new_discoveries(t
                 "capabilities": [
                     {
                         "capability": "web.custom_scan",
+                        "stage": "execute",
                         "contract_version": "1",
                         "description": "Scan an authorized web application.",
                         "target_types": ["web_application"],
@@ -960,6 +1445,7 @@ def test_failed_registry_refresh_preserves_the_active_snapshot(tmp_path) -> None
         "capabilities": [
             {
                 "capability": "web.custom_scan",
+                "stage": "execute",
                 "description": "Scan an authorized web application.",
                 "target_types": ["web_application"],
                 "required_operation": "web_scan",

@@ -11,6 +11,10 @@ from .domain import (
     AuditCreateRequest,
     AuditEvent,
     AuditState,
+    AuditPipeline,
+    PipelineStage,
+    PipelineTransitionRequest,
+    StageStatus,
     PlanApprovalRequest,
     PlanValidationStatus,
     FindingValidationRequest,
@@ -35,6 +39,10 @@ from .findings.retest import RetestError, RetestService
 from .reporting.generator import ReportGenerationError, ReportGenerator
 from .policy.plan import PlanPolicyError, validate_plan
 from .policy.scope import ScopeValidationError, validate_scope
+from .pipeline.service import AuditPipelineService, PipelineTransitionError
+from .recon.service import ReconDiscoveryService
+from .recon.policy import default_recon_policy
+from .recon.planner import ReconPlanner, ReconPlanningError
 from .planning.model_gateway import ModelGatewayError, OpenAICompatibleModelGateway
 from .planning.model_profiles import ModelProfileError, ModelProfileRegistry
 from .planning.service import AuditPlanner, PlanningError
@@ -71,6 +79,10 @@ def create_app(
     app.state.finding_service = FindingService()
     app.state.retest_service = RetestService()
     app.state.report_generator = ReportGenerator(app.state.intelligence_service)
+    app.state.audit_pipeline_service = AuditPipelineService()
+    app.state.recon_discovery_service = ReconDiscoveryService()
+    app.state.recon_policy = default_recon_policy()
+    app.state.recon_planner = ReconPlanner()
 
     @app.get("/", include_in_schema=False)
     def audit_console() -> FileResponse:
@@ -343,6 +355,38 @@ def create_app(
         if audit is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
         return app.state.audit_repository.list_events(audit_id)
+
+    @app.get("/audits/{audit_id}/pipeline", response_model=AuditPipeline)
+    def get_audit_pipeline(audit_id: UUID) -> AuditPipeline:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        return app.state.audit_pipeline_service.effective_pipeline(audit)
+
+    @app.post("/audits/{audit_id}/pipeline/transition", response_model=Audit)
+    def transition_audit_pipeline(audit_id: UUID, request: PipelineTransitionRequest) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        try:
+            pipeline, changed, transition = app.state.audit_pipeline_service.transition(audit, request)
+        except PipelineTransitionError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": error.code, "message": error.message},
+            )
+        if not changed:
+            return audit
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "pipeline.stage_{}".format(
+                "started" if request.status == StageStatus.RUNNING else "completed"
+                if request.status == StageStatus.SUCCEEDED else "failed"
+                if request.status == StageStatus.FAILED else "blocked"
+                if request.status == StageStatus.BLOCKED else "ready"
+            ),
+            {"pipeline_version": pipeline.pipeline_version, **transition, "reason": request.reason},
+        )
 
     @app.post("/admin/plugins/refresh")
     def refresh_plugin_registry(
@@ -666,6 +710,94 @@ def create_app(
                 "gap_count": len(discovery.gaps),
                 "registry_version": discovery.registry_version,
                 "registry_snapshot_id": discovery.registry_snapshot_id,
+            },
+        )
+
+    @app.post("/audits/{audit_id}/recon/capabilities/discover", response_model=Audit)
+    def discover_recon_capabilities(audit_id: UUID) -> Audit:
+        """Persist the current recon-stage capabilities that are executable for this target."""
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.recon_capability_discovery is not None:
+            return audit
+        if audit.scope_policy is None or audit.target_profile is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Recon capabilities cannot be discovered before scope validation and target profiling",
+            )
+
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        recon_progress = next(item for item in pipeline.stages if item.stage == PipelineStage.RECON)
+        if pipeline.current_stage != PipelineStage.RECON or recon_progress.status not in {
+            StageStatus.READY,
+            StageStatus.RUNNING,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Recon capabilities can only be discovered while the RECON stage is ready or running",
+            )
+        try:
+            discovery = app.state.recon_discovery_service.discover(
+                audit,
+                app.state.capability_registry,
+                app.state.execution_service,
+            )
+        except (RegistryError, ExecutionError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Recon capability registry error: {}".format(error),
+            )
+
+        audit.recon_capability_discovery = discovery
+        audit.recon_capabilities_discovered_at = discovery.discovered_at
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "recon.capabilities_discovered",
+            {
+                "candidate_count": len(discovery.candidates),
+                "gap_count": len(discovery.gaps),
+                "registry_version": discovery.registry_version,
+                "registry_snapshot_id": discovery.registry_snapshot_id,
+            },
+        )
+
+    @app.post("/audits/{audit_id}/recon/plan", response_model=Audit)
+    def create_recon_plan(audit_id: UUID) -> Audit:
+        """Create a bounded, capability-level recon DAG without invoking a model."""
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.recon_plan is not None:
+            return audit
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        recon_progress = next(item for item in pipeline.stages if item.stage == PipelineStage.RECON)
+        if pipeline.current_stage != PipelineStage.RECON or recon_progress.status not in {
+            StageStatus.READY,
+            StageStatus.RUNNING,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A recon plan can only be created while the RECON stage is ready or running",
+            )
+        try:
+            plan = app.state.recon_planner.create(audit, app.state.recon_policy)
+        except ReconPlanningError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": error.code, "message": error.message},
+            )
+        audit.recon_plan = plan
+        audit.recon_plan_created_at = plan.generated_at
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "recon.plan_created",
+            {
+                "plan_version": plan.plan_version,
+                "policy_version": plan.policy_version,
+                "registry_snapshot_id": plan.registry_snapshot_id,
+                "step_count": len(plan.steps),
+                "coverage_gap_count": len(plan.coverage_gaps),
             },
         )
 

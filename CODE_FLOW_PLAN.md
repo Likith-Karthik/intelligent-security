@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | Draft — AI post-processing revision |
+| Status | Stage 1 implemented — Stage 2 Flows 1–4 implemented |
 | Scope | POC implementation flow |
 | Parent document | POC Architecture |
-| Last updated | 18 August 2026 |
+| Last updated | 25 August 2026 |
 
 ## 1. Purpose
 
@@ -845,3 +845,557 @@ Each flow is complete only when it has:
 - Idempotency behavior where applicable
 - Audit and correlation identifiers
 - Documented operator-visible errors
+
+## 22. Stage 2 — Compartmentalized Audit Pipeline
+
+### 22.1 Relationship to Stage 1
+
+The existing Flows 1–13 and their persisted data form **Stage 1**, the working vertical POC. Stage 2 builds on that implementation rather than replacing it. Existing authorization, registry, model gateway, scheduling, execution, evidence, finding, reporting, and retest components remain the foundation.
+
+Stage 2 groups those components into five explicit operational compartments:
+
+```mermaid
+flowchart TD
+    A["Authorization and policy gate"] --> R["1. Recon"]
+    R --> P["2. Plan"]
+    P --> E["3. Execute"]
+    E --> V["4. Validate"]
+    V -->|More testing required| P
+    V -->|Confirmed findings| REP["Report"]
+    V -->|Explicit authorization| O["5. Offensive"]
+    O --> V
+```
+
+Authorization, scope enforcement, plugin admission, runtime isolation, evidence integrity, audit events, budgets, cancellation, and model-output validation are cross-cutting controls. They apply to every compartment and are not implemented as ordinary plugins.
+
+### 22.2 Plugin capability classification
+
+Plugins remain implementation packages; stages select their advertised capabilities. A single plugin may advertise capabilities for more than one stage. Each capability manifest gains a required `stage` classification:
+
+- `recon` — discovers assets, services, technologies, endpoints, and other attack-surface facts.
+- `execute` — tests hypotheses or scans the discovered surface for security weaknesses.
+- `validate` — independently retests an observation or candidate finding and produces confirmation evidence.
+- `offensive` — performs an explicitly authorized offensive action. Stage 2 initially admits no executable capability in this class.
+
+The `plan` compartment uses the model gateway and does not invoke a target-facing security plugin. Model providers remain replaceable through purpose-specific model profiles.
+
+### 22.3 Compartment 1 — Recon
+
+**Responsibility:** Build an evidence-backed target and attack-surface profile before the main AI plan.
+
+**Processing:**
+
+1. Start from the Stage 1 validated scope and basic declared target profile.
+2. Discover enabled, healthy, runtime-eligible capabilities classified as `recon`.
+3. Use a deterministic recon policy to select compatible non-destructive capabilities within the recon budget. This avoids requiring the main audit plan before its own recon input exists.
+4. Execute recon capabilities through the existing resolver, adapters, sandbox, and evidence collector.
+5. Normalize their output into versioned `recon-observation/v1` records.
+6. Merge accepted observations into an immutable `ReconSnapshot` containing assets, services, technologies, interfaces, endpoints, and explicit coverage gaps.
+
+Recon plugins never expand authorization. A discovered hostname, address, repository path, or endpoint is recorded but cannot be scanned further unless it is already covered by the validated scope policy.
+
+**Initial capability families:**
+
+- `network.port_discovery`
+- `network.service_fingerprint`
+- `web.http_fingerprint`
+- `web.content_discovery`
+- `web.endpoint_discovery`
+- `source.inventory`
+
+**Completion test:** Given the same scope, registry snapshot, plugin evidence, and recon policy version, the accepted `ReconSnapshot` is reproducible and contains only in-scope references.
+
+### 22.4 Compartment 2 — Plan
+
+**Responsibility:** Generate a capability-level audit DAG from recon evidence.
+
+The planner receives the audit objective, scope summary, `ReconSnapshot`, executable `execute` and `validate` capability descriptors, prior validation outcomes, budgets, and coverage gaps. It never receives plugin commands, connection details, credentials, runtime allowlists, or private execution descriptors.
+
+Every generated step must reference an exact discovered capability and declare its intended evidence objective. Existing schema, dependency, scope, budget, and policy validation remains mandatory. Invalid output receives only bounded repair attempts.
+
+**Completion test:** Removing an executable capability or changing the recon snapshot changes new planner context without requiring planner source-code changes.
+
+### 22.5 Compartment 3 — Execute
+
+**Responsibility:** Execute the approved audit DAG using late-bound plugins.
+
+Stage 1 scheduling, runtime resolution, adapters, isolation, cancellation, and raw evidence capture are retained. The scheduler stores capability requirements rather than plugin IDs. At invocation time, the resolver selects an eligible plugin implementation for the required contract and validated target form.
+
+Execution results never become findings directly. They enter the evidence pipeline as immutable artifacts with invocation provenance, checksums, plugin/runtime identity, timing, and scope references.
+
+**Completion test:** An implementation can be replaced by another plugin satisfying the same capability contract without changing the saved plan or scheduler code.
+
+### 22.6 Compartment 4 — Validate
+
+**Responsibility:** Convert raw execution evidence into defensible finding states and decide whether more testing is required.
+
+1. AI normalization converts plugin output into typed observations; deterministic validation enforces evidence IDs, scope, field types, and checksums.
+2. AI correlation groups observations and proposes candidate findings without changing their accepted state.
+3. Available `validate` plugins independently retest candidate findings when applicable.
+4. The validation model analyzes the original and retest evidence and returns a typed recommendation.
+5. Deterministic finding policy assigns `CONFIRMED`, `INCONCLUSIVE`, `REJECTED`, or `MORE_TESTING_REQUIRED`.
+6. `MORE_TESTING_REQUIRED` creates a bounded replan request containing the specific evidence gap; it does not restart Recon automatically or permit an unbounded loop.
+
+A model recommendation alone cannot confirm a vulnerability. Confirmation requires accepted evidence satisfying the finding and validation policies. If no suitable validation plugin exists, the result remains candidate or inconclusive and the report states that limitation.
+
+**Completion test:** Hallucinated evidence references and out-of-scope claims are rejected, while a supported validation result can be traced to both original and retest artifacts.
+
+### 22.7 Compartment 5 — Offensive boilerplate
+
+**Responsibility:** Reserve a fail-closed extension point for future explicitly authorized offensive plugins.
+
+Stage 2 adds domain and API placeholders only:
+
+- `OffensivePermissionGrant` with audit ID, exact assets, allowed operations, approver, issue time, expiry, and revocation state.
+- `OffensivePlan` and typed `OffensiveStep` schemas that can reference only capabilities classified as `offensive`.
+- States `OFFENSIVE_PERMISSION_REQUIRED`, `OFFENSIVE_BLOCKED`, `OFFENSIVE_APPROVED`, and `OFFENSIVE_DISABLED`.
+- Events for permission requested, granted, rejected, expired, and revoked.
+- A policy rule that always resolves to `OFFENSIVE_DISABLED` while the feature flag and approved adapter set are empty.
+- API responses and UI status that explain the blocked state without exposing a run button.
+
+There is initially no offensive adapter, executable offensive plugin, fallback to an `execute` capability, or model-controlled permission decision. Enabling this compartment later requires explicit product approval, provider approval where applicable, threat modeling, adapter implementation, and dedicated tests.
+
+### 22.8 Reporting and closure
+
+Reporting remains an output layer after Validate rather than a sixth operational compartment. It compiles confirmed findings, candidate/inconclusive results, recon and execution coverage, limitations, citations, plugin/model provenance, and retest history from persisted accepted state.
+
+Audit closure remains available after reporting and retest completion. Offensive execution is not required to complete or close a normal audit.
+
+### 22.9 Stage 2 implementation order
+
+1. Add stage-aware capability contracts and compatibility migration for existing manifests.
+2. Add `ReconRun`, `ReconObservation`, and immutable `ReconSnapshot` schemas.
+3. Build the bounded recon coordinator on the existing registry, resolver, execution, and evidence services.
+4. Add recon normalizers and at least one real non-destructive recon plugin.
+5. Add the `ReconSnapshot` to planner context and restrict the main plan to `execute` and `validate` capabilities.
+6. Introduce explicit compartment state and events while preserving Stage 1 audit IDs and evidence.
+7. Implement the bounded `Validate → Plan` evidence-gap loop.
+8. Extend autonomous UI progression through Recon, Plan, Execute, Validate, Report, and Close.
+9. Add offensive schemas, disabled policy, API status, and UI placeholder with no executable path.
+10. Run migration, unit, integration, real-plugin, and UI end-to-end tests.
+
+### 22.10 Stage 2 acceptance criteria
+
+- Every target-facing action is executed by an admitted plugin capability through an approved adapter.
+- Recon output is stored as evidence and supplied to planning only after deterministic validation.
+- The planner can select only runtime-eligible `execute` and `validate` capabilities.
+- Validation can request a bounded replan without expanding scope or creating an infinite loop.
+- Reports distinguish confirmed, inconclusive, rejected, and uncovered areas.
+- Offensive requests always fail closed with `OFFENSIVE_DISABLED` until the separately approved implementation is enabled.
+- Existing Stage 1 audits remain readable and existing evidence references remain valid.
+
+## 23. Stage 2 Step-by-Step Code Flows
+
+Implement these flows in order. Each flow ends with a stable persisted boundary and its own tests; a later flow must consume the earlier flow's public schema rather than its internal implementation.
+
+```mermaid
+flowchart TD
+    S201["S2.1 Add stage-aware capability contracts"] --> S202["S2.2 Add pipeline state and compatibility"]
+    S202 --> S203["S2.3 Discover recon capabilities"]
+    S203 --> S204["S2.4 Build deterministic recon plan"]
+    S204 --> S205["S2.5 Execute recon plugins"]
+    S205 --> S206["S2.6 Normalize and finalize ReconSnapshot"]
+    S206 --> S207["S2.7 Generate main AI audit plan"]
+    S207 --> S208["S2.8 Execute main audit plan"]
+    S208 --> S209["S2.9 Normalize, correlate, and validate"]
+    S209 -->|Evidence gap| S210["S2.10 Bounded replan"]
+    S210 --> S208
+    S209 -->|Accepted result| S211["S2.11 Report and close"]
+    S209 -->|Explicit permission path| S212["S2.12 Offensive boilerplate"]
+    S212 --> S209
+    S211 --> S213["S2.13 Autonomous UI and end-to-end tests"]
+```
+
+### 23.1 S2 Flow 1 — Add stage-aware capability contracts
+
+**Goal:** Classify capabilities by pipeline compartment without adding plugin-specific branches to core code.
+
+**Code changes:**
+
+1. Add `CapabilityStage` with `recon`, `execute`, `validate`, and `offensive` values.
+2. Add `stage` to `PluginCapability` and `CapabilityCandidate`.
+3. Include `stage` in registry snapshot hashing and sanitized capability descriptors.
+4. Update bundled manifests: Nuclei scan is `execute`; Nuclei recheck is `validate`.
+5. During the Stage 2 migration only, admit old manifests through a documented compatibility mapping or reject them with a precise migration error. Do not infer a stage indefinitely.
+6. Allow registry discovery to filter by one or more requested stages.
+
+**Primary files:**
+
+- `src/intelligent_security/domain.py`
+- `src/intelligent_security/registry/service.py`
+- `src/intelligent_security/plugins/packages/*/manifest.json`
+- `src/intelligent_security/plugins/README.md`
+
+**Tests:**
+
+- Admit a valid stage-aware manifest.
+- Reject an unknown stage.
+- Verify stage changes alter the registry snapshot ID.
+- Verify discovery returns only requested stages.
+- Verify no plugin ID, command, runtime profile, or credential enters planner context.
+
+**Done when:** A capability can be filtered by stage using only manifest data and generic registry code.
+
+### 23.2 S2 Flow 2 — Add pipeline state and Stage 1 compatibility
+
+**Goal:** Track compartment progress without invalidating persisted Stage 1 audits.
+
+**Code changes:**
+
+1. Add `PipelineStage`: `PREFLIGHT`, `RECON`, `PLAN`, `EXECUTE`, `VALIDATE`, `REPORT`, `OFFENSIVE`, and `CLOSED`.
+2. Add `StageStatus`: `PENDING`, `READY`, `RUNNING`, `SUCCEEDED`, `FAILED`, `BLOCKED`, and `SKIPPED`.
+3. Add a versioned `AuditPipeline` containing current stage, per-stage status, attempt counters, and timestamps.
+4. Make `Audit.pipeline` optional on persisted input. When absent, derive a read-only Stage 1 compatibility view; do not rewrite stored evidence or IDs merely by reading the audit.
+5. Centralize permitted stage transitions in one deterministic transition service.
+6. Emit `pipeline.stage_started`, `pipeline.stage_completed`, `pipeline.stage_failed`, and `pipeline.stage_blocked`.
+
+**Primary files:**
+
+- `src/intelligent_security/domain.py`
+- `src/intelligent_security/repository.py`
+- `src/intelligent_security/pipeline/service.py` — new
+- `src/intelligent_security/app.py`
+
+**Tests:**
+
+- Load an existing Stage 1 audit payload.
+- Reject skipped, reversed, and repeated illegal transitions.
+- Verify transition endpoints are idempotent.
+- Verify events and timestamps are persisted atomically with state.
+
+**Done when:** Old audits remain readable and a new audit can enter `RECON/READY` only after authorization and scope validation.
+
+### 23.3 S2 Flow 3 — Discover executable recon capabilities
+
+**Goal:** Build a target-specific recon catalog before running any recon tool.
+
+**Input:** Validated scope, basic target profile, active registry snapshot, runtime profiles, adapter availability, credentials, and recon budget.
+
+**Processing:**
+
+1. Query only capabilities with `stage=recon`.
+2. Apply target-type, operation, required-input, credential, health, adapter, runtime, and exact-host eligibility checks.
+3. Produce sanitized candidates and explicit coverage gaps.
+4. Persist the registry snapshot ID so later recon execution can detect catalog drift.
+
+**Endpoint:** `POST /audits/{audit_id}/recon/capabilities/discover`
+
+**Event:** `recon.capabilities_discovered`
+
+**Primary files:**
+
+- `src/intelligent_security/registry/service.py`
+- `src/intelligent_security/execution/service.py`
+- `src/intelligent_security/recon/service.py` — new
+- `src/intelligent_security/app.py`
+
+**Tests:**
+
+- Exclude a recon plugin without an enabled runtime.
+- Exclude a runtime whose target allowlist does not match.
+- Report missing port, web, or source recon as a gap rather than fabricating a capability.
+- Confirm discovery invokes no plugin and makes no model call.
+
+**Done when:** The persisted recon catalog contains only capabilities that can be executed for this audit now.
+
+**POC implementation:** `ReconDiscoveryService` obtains the execution-eligible plugin IDs from the shared runtime resolver, then asks the registry for `stage=recon` capabilities only. `POST /audits/{audit_id}/recon/capabilities/discover` is available only while the `RECON` pipeline stage is `READY` or `RUNNING`; it persists the catalog, timestamp, registry snapshot ID, and `recon.capabilities_discovered` event. It does not invoke a plugin or an AI model.
+
+### 23.4 S2 Flow 4 — Build the deterministic recon plan
+
+**Goal:** Select safe baseline recon without depending on the main AI plan.
+
+**Processing:**
+
+1. Group recon candidates by capability family and target type.
+2. Apply a versioned `ReconPolicy` defining allowed risk class, maximum steps, concurrency, time, and cost.
+3. Select the highest-ranked implementation-independent capability contracts.
+4. Add dependencies only when required by typed inputs—for example, service fingerprinting may depend on port discovery.
+5. Persist a `ReconPlan` with policy version, registry snapshot ID, rationale codes, and coverage gaps.
+6. Reject any capability that can modify the target, exploit a weakness, or expand scope.
+
+**Endpoint:** `POST /audits/{audit_id}/recon/plan`
+
+**Event:** `recon.plan_created`
+
+**Primary files:**
+
+- `src/intelligent_security/recon/policy.py` — new
+- `src/intelligent_security/recon/planner.py` — new, deterministic
+- `src/intelligent_security/domain.py`
+
+**Tests:**
+
+- Produce the same plan for the same inputs and policy version.
+- Respect time, cost, concurrency, and step-count limits.
+- Reject offensive or destructive capability classifications.
+- Preserve explicit gaps when a capability family is unavailable.
+
+**Done when:** Recon has a bounded executable DAG without calling an LLM.
+
+**POC implementation:** `ReconPlanner` selects the highest-ranked executable contract for each capability, resolves the small policy-owned dependency map, and enforces the versioned policy plus audit time and cost budgets. The persisted `ReconPlan` stores capability contracts only—never plugin IDs or invocation details—along with policy/snapshot provenance, bounds, rationale codes, and coverage gaps. `POST /audits/{audit_id}/recon/plan` is idempotent and emits `recon.plan_created`; it does not invoke a plugin or an AI model.
+
+### 23.5 S2 Flow 5 — Execute recon plugins and capture evidence
+
+**Goal:** Reuse the Stage 1 execution boundary for recon steps.
+
+**Processing:**
+
+1. Convert approved `ReconStep` records into scheduler-compatible typed steps.
+2. Revalidate scope, registry snapshot, runtime eligibility, and budget immediately before each invocation.
+3. Resolve capabilities to plugins late; never store plugin IDs in the recon plan.
+4. Execute through existing approved adapters and isolation controls.
+5. Store immutable invocation, stdout, stderr, files, HTTP records, and tool metadata through the existing evidence collector.
+6. Mark dependent steps ready only after prerequisites succeed.
+
+**Endpoints:**
+
+- `POST /audits/{audit_id}/recon/schedule`
+- `POST /audits/{audit_id}/recon/steps/{step_id}/execute`
+
+**Events:** `recon.step_started`, `recon.step_completed`, `recon.step_failed`, and `evidence.stored`.
+
+**Primary files:**
+
+- `src/intelligent_security/recon/scheduling.py` — new
+- `src/intelligent_security/execution/service.py`
+- `src/intelligent_security/evidence/collector.py`
+- `src/intelligent_security/app.py`
+
+**Tests:**
+
+- Execute one real non-destructive recon plugin against an authorized test target.
+- Verify exact target-form rendering (`url` or `hostname`).
+- Verify out-of-scope discovered assets are stored but never scheduled.
+- Verify timeout, cancellation, non-zero exit, and unavailable-runtime behavior.
+
+**Done when:** A recon run produces checksummed raw evidence through the same trusted execution path as Stage 1.
+
+### 23.6 S2 Flow 6 — Normalize recon and create the ReconSnapshot
+
+**Goal:** Give the planner a stable, tool-independent representation of the attack surface.
+
+**Schemas:**
+
+- `ReconObservation`: type, value, parent asset, source evidence ID, confidence, first/last observed, and scope status.
+- `ReconSnapshot`: snapshot ID, audit ID, registry snapshot ID, assets, services, technologies, endpoints, interfaces, coverage gaps, evidence IDs, and creation time.
+
+**Processing:**
+
+1. Use package normalizers to create typed recon-observation proposals.
+2. Optionally use the `recon_normalization` model profile for heterogeneous output.
+3. Deterministically validate field types, evidence references, checksums, canonical hosts/URLs, scope status, and bounded sizes.
+4. Deduplicate observations using canonical typed keys.
+5. Freeze an immutable snapshot after every scheduled recon step reaches a terminal state.
+6. Preserve out-of-scope discoveries as informational records with `scope_status=OUT_OF_SCOPE`; exclude them from planner targets.
+
+**Endpoints:**
+
+- `POST /audits/{audit_id}/recon/evidence/{evidence_id}/normalize`
+- `POST /audits/{audit_id}/recon/finalize`
+
+**Events:** `recon.observation_accepted`, `recon.observation_rejected`, and `recon.snapshot_created`.
+
+**Primary files:**
+
+- `src/intelligent_security/recon/normalizer.py` — new
+- `src/intelligent_security/recon/snapshot.py` — new
+- `src/intelligent_security/intelligence/service.py`
+- `src/intelligent_security/domain.py`
+
+**Tests:**
+
+- Reject invented evidence IDs and malformed confidence values.
+- Canonicalize equivalent host, URL, port, and endpoint records.
+- Keep out-of-scope observations visible but non-executable.
+- Verify identical accepted inputs produce the same snapshot digest.
+
+**Done when:** Planning can use the `ReconSnapshot` without parsing native plugin output.
+
+### 23.7 S2 Flow 7 — Generate and approve the main AI audit plan
+
+**Goal:** Plan security testing from accepted recon evidence and the executable audit catalog.
+
+**Processing:**
+
+1. Discover runtime-eligible `execute` and `validate` capabilities against the finalized recon snapshot and current scope.
+2. Build bounded planner context from the objective, scope, recon summary, coverage gaps, budgets, and sanitized capabilities.
+3. Require exact capability IDs, typed evidence objectives, empty plugin inputs, valid dependencies, and at least one step when executable capabilities exist.
+4. Use bounded model repair for invalid structured output.
+5. Apply deterministic plan policy and persist approval or rejection.
+
+**Existing endpoints retained:**
+
+- `POST /audits/{audit_id}/plan/generate`
+- `POST /audits/{audit_id}/plan/validate`
+
+**Primary files:**
+
+- `src/intelligent_security/planning/service.py`
+- `src/intelligent_security/policy/plan.py`
+- `src/intelligent_security/planning/model_gateway.py`
+
+**Tests:**
+
+- Verify planner context contains recon facts but no raw artifacts or private plugin descriptors.
+- Reject capability categories such as `web_scan` when an exact capability ID is required.
+- Reject steps targeting out-of-scope recon discoveries.
+- Verify a changed `ReconSnapshot` invalidates an unapproved stale plan.
+
+**Done when:** The approved plan is evidence-informed, capability-based, and contains no plugin-specific invocation data.
+
+### 23.8 S2 Flow 8 — Execute the main audit plan
+
+**Goal:** Retain Stage 1 execution behavior under the explicit `EXECUTE` compartment.
+
+**Processing:**
+
+1. Schedule approved `execute` steps and any planner-requested `validate` dependencies.
+2. Resolve and invoke plugins using the existing Flow 7–9 infrastructure.
+3. Capture immutable evidence for every attempt.
+4. Persist step outcomes and release dependent steps.
+5. When a capability disappears, return a structured gap for bounded replanning; never substitute a semantically different capability.
+
+**Existing endpoints retained:**
+
+- `POST /audits/{audit_id}/plan/schedule`
+- `POST /audits/{audit_id}/steps/{step_id}/execute`
+
+**Tests:** Re-run Stage 1 scheduler, late-binding, evidence, timeout, and real-plugin integration tests under the new compartment state.
+
+**Done when:** All planned steps are terminal and every attempted invocation has an evidence or blocked-execution record.
+
+### 23.9 S2 Flow 9 — Normalize, correlate, and validate findings
+
+**Goal:** Produce accepted finding states and a typed decision about what happens next.
+
+**Processing:**
+
+1. Normalize all eligible execution evidence into observations.
+2. Correlate observations into candidate findings with evidence citations.
+3. Discover compatible `validate` capabilities for each candidate.
+4. Generate and execute restricted validation steps when available.
+5. Ask the validation model for a typed evidence analysis.
+6. Apply deterministic state policy.
+7. Produce `ValidationDecision` with `REPORT_READY`, `MORE_TESTING_REQUIRED`, or `OFFENSIVE_PERMISSION_REQUIRED`.
+
+**Endpoints:**
+
+- Existing evidence normalization and finding correlation endpoints remain supported.
+- Add `POST /audits/{audit_id}/validation/finalize` to produce the compartment decision.
+
+**Events:** `validation.started`, `validation.plugin_completed`, `validation.decision_created`, and existing finding-state events.
+
+**Tests:**
+
+- Reject string confidence where a numeric value is required.
+- Reject invented evidence, observation, finding, and capability IDs.
+- Confirm only findings satisfying evidence policy.
+- Return `INCONCLUSIVE` when no validation capability or sufficient evidence exists.
+
+**Done when:** Every candidate has a traceable accepted state and the audit has one typed next decision.
+
+### 23.10 S2 Flow 10 — Perform bounded evidence-gap replanning
+
+**Goal:** Allow intelligent follow-up testing without an unbounded autonomous loop.
+
+**Processing:**
+
+1. Accept only a persisted `MORE_TESTING_REQUIRED` decision containing finding IDs, missing evidence types, and permitted capability families.
+2. Increment `replan_attempt`; enforce configured per-finding and per-audit limits.
+3. Rebuild planner context from accepted state only, including prior attempts and failures.
+4. Permit only incremental `execute` or `validate` steps; prohibit repeated equivalent steps using canonical step digests.
+5. Reapply normal plan policy, scheduling, execution, and validation.
+6. Resolve exhausted attempts to `INCONCLUSIVE` and continue to reporting.
+
+**Endpoint:** `POST /audits/{audit_id}/replan`
+
+**Events:** `replan.requested`, `replan.approved`, `replan.rejected`, and `replan.exhausted`.
+
+**Tests:**
+
+- Enforce loop, budget, and duplicate-step limits.
+- Prevent scope expansion and Recon restart.
+- Verify a useful new step returns to Execute and then Validate.
+- Verify exhaustion produces a reportable inconclusive result.
+
+**Done when:** The `Validate → Plan → Execute → Validate` loop is useful, bounded, auditable, and scope-preserving.
+
+### 23.11 S2 Flow 11 — Generate report and close
+
+**Goal:** Complete ordinary audits independently of the Offensive compartment.
+
+**Processing:**
+
+1. Require terminal execution and validation decisions.
+2. Generate the AI report draft from persisted accepted state.
+3. Deterministically compile citations, coverage, limitations, plugin/model provenance, and finding states.
+4. Persist report input digest and reuse an unchanged report.
+5. Permit retests through the existing restricted retest path.
+6. Close when no required validation or retest work remains.
+
+**Existing endpoints retained:** Report JSON/Markdown, retest, comparison, and close endpoints.
+
+**Tests:**
+
+- Include recon and audit coverage gaps.
+- Exclude unsupported model claims.
+- Close successfully without entering Offensive.
+- Preserve idempotent report retrieval and closure.
+
+**Done when:** A completed normal audit has a cited report and a complete event/evidence history.
+
+### 23.12 S2 Flow 12 — Add fail-closed Offensive boilerplate
+
+**Goal:** Model future control and persistence boundaries without enabling offensive execution.
+
+**Processing:**
+
+1. Add the permission, plan, step, state, and event schemas described in Section 22.7.
+2. Add `GET /audits/{audit_id}/offensive/status`.
+3. Add `POST /audits/{audit_id}/offensive/request`, returning persisted `OFFENSIVE_DISABLED` while the feature is unavailable.
+4. Do not add execute, approve, or adapter endpoints yet.
+5. Exclude `offensive` capabilities from ordinary discovery, planner context, scheduling, and fallback resolution.
+6. Render a read-only disabled status in the UI.
+
+**Primary files:**
+
+- `src/intelligent_security/offensive/domain.py` — new
+- `src/intelligent_security/offensive/policy.py` — new
+- `src/intelligent_security/app.py`
+- `src/intelligent_security/ui/*`
+
+**Tests:**
+
+- Every request resolves to `OFFENSIVE_DISABLED` without invoking a plugin or model.
+- Ordinary plans cannot reference offensive capabilities.
+- No request body can self-grant permission.
+- No offensive run/approval control appears in the UI.
+
+**Done when:** The future boundary is visible and auditable but has no executable path.
+
+### 23.13 S2 Flow 13 — Extend autonomous UI and run end-to-end tests
+
+**Goal:** Make the five compartments observable and resumable through one autonomous audit experience.
+
+**UI behavior:**
+
+1. Display Recon, Plan, Execute, Validate, and Report progress separately.
+2. Show active plugin/model operation, accepted outputs, gaps, retries, and blocked reasons.
+3. Continue automatically between safe stages.
+4. Retain Pause, Exit, and Restart controls using persisted server state.
+5. Show Offensive as disabled and read-only.
+6. Prevent stale polling responses from replacing the currently selected audit.
+
+**End-to-end test matrix:**
+
+- No-plugin audit with explicit coverage gaps and empty report.
+- Real recon plugin followed by a real audit plugin against an authorized test target.
+- Model planner malformed-output repair and terminal failure.
+- Runtime removal between planning and execution followed by bounded replan.
+- Validation plugin available and unavailable cases.
+- Out-of-scope recon discovery containment.
+- Pause, restart, and browser refresh during every compartment.
+- Stage 1 audit compatibility and Stage 2 full lifecycle.
+- Offensive request remains disabled in API and UI.
+
+**Done when:** A fresh authorized audit progresses through Recon → Plan → Execute → Validate → Report without manual approvals for safe actions, survives restart, and produces an evidence-backed result with no mocks in the real-plugin integration path.

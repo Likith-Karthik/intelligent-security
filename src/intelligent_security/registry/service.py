@@ -9,6 +9,7 @@ from intelligent_security.domain import (
     CapabilityCandidate,
     CapabilityDiscovery,
     CapabilityGap,
+    CapabilityStage,
     PluginHealth,
     PluginExecutionSpec,
     PluginNormalizerSpec,
@@ -133,7 +134,12 @@ class CapabilityRegistry:
             return self.refresh()
         return self._snapshot
 
-    def discover(self, audit: Audit, eligible_plugin_ids: Optional[Set[str]] = None) -> CapabilityDiscovery:
+    def discover(
+        self,
+        audit: Audit,
+        eligible_plugin_ids: Optional[Set[str]] = None,
+        stages: Optional[Set[CapabilityStage]] = None,
+    ) -> CapabilityDiscovery:
         if audit.target_profile is None or audit.scope_policy is None:
             raise RegistryError("Target profile and scope policy are required for capability discovery.")
 
@@ -150,6 +156,8 @@ class CapabilityRegistry:
             if eligible_plugin_ids is not None and manifest.plugin_id not in eligible_plugin_ids:
                 continue
             for capability in manifest.capabilities:
+                if stages is not None and capability.stage not in stages:
+                    continue
                 if audit.target_profile.target_type not in capability.target_types:
                     continue
                 if capability.required_operation not in audit.scope_policy.allowed_operations:
@@ -161,6 +169,7 @@ class CapabilityRegistry:
                         rank=0,
                         capability=capability.capability,
                         contract_version=capability.contract_version,
+                        stage=capability.stage,
                         description=capability.description,
                         plugin_id=manifest.plugin_id,
                         plugin_version=manifest.plugin_version,
@@ -180,6 +189,7 @@ class CapabilityRegistry:
                 -item.reliability,
                 item.estimated_cost_usd,
                 item.estimated_duration_seconds,
+                item.stage.value,
                 item.plugin_id,
             )
         )

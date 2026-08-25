@@ -47,6 +47,7 @@ A capability may declare `validation_for` with the capability contracts it can s
 ```json
 {
   "capability": "web.vulnerability.validate",
+  "stage": "validate",
   "validation_for": ["web.vulnerability_scan"],
   "required_operation": "web_scan"
 }
@@ -69,6 +70,7 @@ Example: LLM testing plugin using the LLM-testing adapter.
   "capabilities": [
     {
       "capability": "llm.prompt_injection_test",
+      "stage": "execute",
       "contract_version": "1",
       "description": "Test an authorized LLM application for prompt-injection resistance.",
       "target_types": ["llm_application"],
@@ -114,7 +116,7 @@ The runtime profile maps the package ID to the already-approved image or service
 | `health` | No | POC declared health: `declared_healthy` or `declared_unhealthy`. |
 | `capabilities` | Yes | At least one capability definition. |
 
-Each capability must include `capability`, `description`, `target_types`, `required_operation`, `estimated_duration_seconds`, `estimated_cost_usd`, and `reliability`. `contract_version`, `required_inputs`, `input_schema`, and `output_schema` have safe defaults but should be stated explicitly for production plugins.
+Each capability must include `capability`, `stage`, `description`, `target_types`, `required_operation`, `estimated_duration_seconds`, `estimated_cost_usd`, and `reliability`. `stage` is one of `recon`, `execute`, `validate`, or `offensive`; it classifies a capability, not the whole plugin package. `contract_version`, `required_inputs`, `input_schema`, and `output_schema` have safe defaults but should be stated explicitly for production plugins.
 
 `required_operation` must be one of: `static_analysis`, `web_scan`, `port_discovery`, `llm_red_team`, `exploit`, or `destructive_action`. Scope policy filters out any capability the audit is not authorized to use.
 

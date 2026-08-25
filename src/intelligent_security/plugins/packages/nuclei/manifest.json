@@ -8,6 +8,7 @@
   "capabilities": [
     {
       "capability": "web.vulnerability_scan",
+      "stage": "execute",
       "description": "Run template-based vulnerability scans against an authorized web application or API.",
       "target_types": ["web_application", "api"],
       "required_operation": "web_scan",
@@ -18,6 +19,7 @@
     },
     {
       "capability": "web.vulnerability.validate",
+      "stage": "validate",
       "description": "Safely re-check an existing template-based web observation within approved scope.",
       "target_types": ["web_application", "api"],
       "required_operation": "web_scan",
