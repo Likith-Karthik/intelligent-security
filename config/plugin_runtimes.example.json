@@ -7,7 +7,33 @@
       "image_reference": "projectdiscovery/nuclei@sha256:replace-with-approved-image-digest",
       "max_runtime_seconds": 300,
       "allowed_target_hosts": ["authorized.example.com"],
-      "enabled": false
+      "enabled": true
+    },
+    {
+      "plugin_id": "nmap",
+      "adapter": "container_cli",
+      "runtime_reference": "cli-config://nmap-approved-runtime",
+      "image_reference": "instrumentisto/nmap:latest",
+      "max_runtime_seconds": 300,
+      "allowed_target_hosts": ["authorized.example.com", "localhost", "127.0.0.1"],
+      "enabled": true
+    },
+    {
+      "plugin_id": "semgrep",
+      "adapter": "container_cli",
+      "runtime_reference": "cli-config://semgrep-approved-runtime",
+      "image_reference": "semgrep/semgrep:latest",
+      "max_runtime_seconds": 300,
+      "allowed_target_hosts": ["authorized.example.com", "github.com"],
+      "enabled": true
+    },
+    {
+      "plugin_id": "promptfoo",
+      "adapter": "llm_testing",
+      "runtime_reference": "cli-config://promptfoo-approved-runtime",
+      "max_runtime_seconds": 600,
+      "allowed_target_hosts": ["authorized.example.com", "localhost", "127.0.0.1"],
+      "enabled": true
     }
   ]
 }

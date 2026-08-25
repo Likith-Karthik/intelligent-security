@@ -85,6 +85,247 @@ def create_app(
     def audit_console_js() -> FileResponse:
         return FileResponse(os.path.join(os.path.dirname(__file__), "ui", "ui.js"), media_type="application/javascript")
 
+    @app.get("/admin", include_in_schema=False)
+    def admin_console() -> FileResponse:
+        """Serve the internal system and plugin console (non-customer facing)."""
+        return FileResponse(os.path.join(os.path.dirname(__file__), "ui", "admin.html"))
+
+    @app.get("/admin.js", include_in_schema=False)
+    def admin_console_js() -> FileResponse:
+        return FileResponse(os.path.join(os.path.dirname(__file__), "ui", "admin.js"), media_type="application/javascript")
+
+    @app.get("/admin/plugins")
+    def list_plugins_info() -> dict:
+        import shutil
+        snapshot = app.state.capability_registry.active_snapshot()
+        runtime_profiles = {}
+        try:
+            runtime_profiles = app.state.execution_service.runtime_profiles.load()
+        except Exception:
+            pass
+
+        # Check Docker presence on host
+        docker_path = shutil.which("docker")
+        if not docker_path:
+            for pfx in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"]:
+                cand = os.path.join(pfx, "docker")
+                if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                    docker_path = cand
+                    break
+
+        def find_cli_binary(pid: str) -> tuple:
+            bin_map = {
+                "nmap": "nmap",
+                "semgrep": "semgrep",
+                "promptfoo": "promptfoo",
+                "nuclei": "nuclei",
+            }
+            target_bin = bin_map.get(pid, pid)
+            found = shutil.which(target_bin)
+            if not found:
+                for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+                    candidate = os.path.join(prefix, target_bin)
+                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                        found = candidate
+                        break
+            return (found is not None, found, target_bin)
+
+        plugins = []
+        for package in snapshot.packages:
+            manifest = package.manifest
+            runtime = runtime_profiles.get(manifest.plugin_id)
+
+            is_enabled_manifest = bool(manifest.enabled)
+            is_enabled_runtime = bool(runtime.enabled) if runtime else False
+
+            cli_avail, cli_path, bin_name = find_cli_binary(manifest.plugin_id)
+            docker_avail = bool(docker_path and runtime and runtime.image_reference)
+
+            # Plugin is active if manifest enabled AND (runtime profile active OR CLI binary available on host)
+            is_active = is_enabled_manifest and (is_enabled_runtime or cli_avail)
+
+            if is_enabled_manifest and cli_avail and docker_avail:
+                mode = "hybrid"
+                mode_label = "Active (Host CLI & Docker)"
+            elif is_enabled_manifest and cli_avail:
+                mode = "host_cli"
+                mode_label = f"Active (Host CLI: {cli_path})"
+            elif is_enabled_manifest and (is_enabled_runtime or docker_avail):
+                mode = "docker"
+                mode_label = "Active (Docker Container)"
+            elif not is_enabled_manifest:
+                mode = "disabled"
+                mode_label = "Manifest Disabled"
+            else:
+                mode = "standby"
+                mode_label = "No Runtime / CLI Not Found"
+
+            health_str = manifest.health.value if hasattr(manifest.health, "value") else str(manifest.health)
+            adapter_str = manifest.adapter.value if hasattr(manifest.adapter, "value") else str(manifest.adapter)
+
+            capabilities_data = []
+            for cap in manifest.capabilities:
+                capabilities_data.append({
+                    "capability": cap.capability,
+                    "contract_version": cap.contract_version,
+                    "description": cap.description,
+                    "target_types": [t.value if hasattr(t, "value") else str(t) for t in cap.target_types],
+                    "required_operation": cap.required_operation.value if hasattr(cap.required_operation, "value") else str(cap.required_operation),
+                    "required_inputs": cap.required_inputs,
+                    "estimated_duration_seconds": cap.estimated_duration_seconds,
+                    "estimated_cost_usd": cap.estimated_cost_usd,
+                    "reliability": cap.reliability,
+                    "validation_for": cap.validation_for or [],
+                })
+
+            runtime_data = None
+            if runtime:
+                runtime_data = {
+                    "enabled": runtime.enabled,
+                    "adapter": runtime.adapter.value if hasattr(runtime.adapter, "value") else str(runtime.adapter),
+                    "runtime_reference": runtime.runtime_reference,
+                    "image_reference": runtime.image_reference,
+                    "max_runtime_seconds": runtime.max_runtime_seconds,
+                    "allowed_target_hosts": runtime.allowed_target_hosts,
+                }
+
+            plugins.append({
+                "plugin_id": manifest.plugin_id,
+                "plugin_version": manifest.plugin_version,
+                "kind": manifest.kind,
+                "adapter": adapter_str,
+                "manifest_enabled": is_enabled_manifest,
+                "health": health_str,
+                "is_active": is_active,
+                "execution_mode": mode,
+                "execution_mode_label": mode_label,
+                "cli": {
+                    "available": cli_avail,
+                    "binary_path": cli_path,
+                    "binary_name": bin_name,
+                },
+                "docker": {
+                    "available": docker_avail,
+                    "docker_binary": docker_path,
+                    "image_reference": runtime.image_reference if runtime else None,
+                },
+                "has_runtime_profile": runtime is not None,
+                "runtime_profile": runtime_data,
+                "capabilities": capabilities_data,
+                "capability_count": len(capabilities_data),
+                "has_execution_spec": package.execution is not None,
+                "has_normalizer_spec": package.normalizer is not None,
+                "package_path": str(package.root),
+            })
+
+        return {
+            "snapshot_id": snapshot.snapshot_id,
+            "registry_version": snapshot.summary().get("registry_version", "1"),
+            "created_at": snapshot.created_at.isoformat() if hasattr(snapshot.created_at, "isoformat") else str(snapshot.created_at),
+            "docker_available": bool(docker_path),
+            "docker_path": docker_path,
+            "plugins": plugins,
+        }
+
+    @app.get("/admin/model-profiles")
+    def list_model_profiles_info() -> dict:
+        profiles_list = []
+        try:
+            loaded = app.state.model_profile_registry.load_profiles()
+            profiles_list = [p.model_dump(mode="json") for p in loaded]
+        except Exception:
+            pass
+
+        purposes = ["audit_planning", "evidence_normalization", "finding_correlation", "report_generation"]
+        assignments = {}
+        for purpose in purposes:
+            try:
+                selected = app.state.model_profile_registry.select_profile(purpose)
+                assignments[purpose] = {
+                    "profile_id": selected.profile_id,
+                    "model": selected.model,
+                    "provider": selected.provider,
+                    "status": "resolved",
+                }
+            except Exception as e:
+                assignments[purpose] = {
+                    "status": "unresolved",
+                    "reason": str(e),
+                }
+
+        return {
+            "profiles": profiles_list,
+            "assignments": assignments,
+        }
+
+    @app.get("/admin/summary")
+    def get_admin_summary() -> dict:
+        import shutil
+        snapshot = app.state.capability_registry.active_snapshot()
+        runtime_profiles = {}
+        try:
+            runtime_profiles = app.state.execution_service.runtime_profiles.load()
+        except Exception:
+            pass
+
+        def has_cli(pid: str) -> bool:
+            bin_map = {"nmap": "nmap", "semgrep": "semgrep", "promptfoo": "promptfoo", "nuclei": "nuclei"}
+            tb = bin_map.get(pid, pid)
+            if shutil.which(tb):
+                return True
+            for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
+                if os.path.isfile(os.path.join(prefix, tb)) and os.access(os.path.join(prefix, tb), os.X_OK):
+                    return True
+            return False
+
+        packages = snapshot.packages
+        active_count = 0
+        cli_count = 0
+        docker_count = 0
+        disabled_count = 0
+        total_caps = 0
+
+        for p in packages:
+            runtime = runtime_profiles.get(p.manifest.plugin_id)
+            cli_ok = has_cli(p.manifest.plugin_id)
+            runtime_ok = bool(runtime and runtime.enabled)
+            is_active = bool(p.manifest.enabled) and (runtime_ok or cli_ok)
+
+            if is_active:
+                active_count += 1
+            else:
+                disabled_count += 1
+
+            if cli_ok:
+                cli_count += 1
+            if runtime_ok and runtime and runtime.image_reference:
+                docker_count += 1
+
+            total_caps += len(p.manifest.capabilities)
+
+        models_count = 0
+        active_models_count = 0
+        try:
+            models = app.state.model_profile_registry.load_profiles()
+            models_count = len(models)
+            active_models_count = sum(1 for m in models if m.enabled)
+        except Exception:
+            pass
+
+        return {
+            "snapshot_id": snapshot.snapshot_id,
+            "registry_version": CapabilityRegistry.registry_version,
+            "total_plugins": len(packages),
+            "active_plugins": active_count,
+            "cli_active_plugins": cli_count,
+            "docker_active_plugins": docker_count,
+            "disabled_plugins": disabled_count,
+            "total_capabilities": total_caps,
+            "total_model_profiles": models_count,
+            "active_model_profiles": active_models_count,
+            "configured_runtime_profiles": len(runtime_profiles),
+        }
+
     @app.post("/audits", response_model=Audit, status_code=status.HTTP_201_CREATED)
     def create_audit(request: AuditCreateRequest) -> Audit:
         return app.state.audit_repository.create(request)

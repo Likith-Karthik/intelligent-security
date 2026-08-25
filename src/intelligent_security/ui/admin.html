@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>System & Plugins Console · Intelligent Security</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui.css" />
+  </head>
+  <body>
+    <!-- Top Navigation / Header -->
+    <header class="app-header">
+      <div class="header-container">
+        <div class="brand">
+          <div class="brand-icon admin-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+              <line x1="6" y1="6" x2="6.01" y2="6"></line>
+              <line x1="6" y1="18" x2="6.01" y2="18"></line>
+            </svg>
+          </div>
+          <div>
+            <div class="brand-eyebrow">INTELLIGENT SECURITY <span class="internal-badge">INTERNAL ONLY</span></div>
+            <h1 class="brand-title">System & Plugins Console</h1>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <a href="/" class="btn btn-secondary btn-nav">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="19" y1="12" x2="5" y2="12"></line>
+              <polyline points="12 19 5 12 12 5"></polyline>
+            </svg>
+            <span>Audit Console</span>
+          </a>
+
+          <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+            <svg class="theme-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="5"/>
+              <line x1="12" y1="1" x2="12" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="23"/>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+              <line x1="1" y1="12" x2="3" y2="12"/>
+              <line x1="21" y1="12" x2="23" y2="12"/>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+            <svg class="theme-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
+
+          <div class="connection">
+            <i class="status-dot"></i>
+            <span id="connection">Checking API…</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Admin Container -->
+    <main class="app-main admin-main">
+      
+      <!-- Top KPI Summary Cards -->
+      <section class="kpi-grid">
+        <div class="panel kpi-card">
+          <div class="kpi-icon-wrap icon-teal">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+              <polyline points="2 17 12 22 22 17"></polyline>
+              <polyline points="2 12 12 17 22 12"></polyline>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <span class="kpi-label">Active Plugins</span>
+            <div class="kpi-value-row">
+              <span id="kpi-active-plugins" class="kpi-value">—</span>
+              <span id="kpi-total-plugins" class="kpi-sub">/ — total</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel kpi-card">
+          <div class="kpi-icon-wrap icon-indigo">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <span class="kpi-label">Total Capabilities</span>
+            <div class="kpi-value-row">
+              <span id="kpi-capabilities" class="kpi-value">—</span>
+              <span class="kpi-sub">declared</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel kpi-card">
+          <div class="kpi-icon-wrap icon-purple">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+              <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+              <line x1="12" y1="22.08" x2="12" y2="12"></line>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <span class="kpi-label">AI Model Profiles</span>
+            <div class="kpi-value-row">
+              <span id="kpi-models" class="kpi-value">—</span>
+              <span class="kpi-sub">configured</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel kpi-card">
+          <div class="kpi-icon-wrap icon-blue">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+          </div>
+          <div class="kpi-info">
+            <span class="kpi-label">Registry Snapshot</span>
+            <div class="kpi-value-row">
+              <span id="kpi-snapshot" class="kpi-value-mono">—</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Main Admin Navigation Tabs -->
+      <div class="admin-tabs-nav">
+        <button class="tab-btn active" data-tab="plugins-tab">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+          </svg>
+          <span>Plugin Inventory (<span id="tab-plugins-count">0</span>)</span>
+        </button>
+
+        <button class="tab-btn" data-tab="models-tab">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+            <line x1="12" y1="22.08" x2="12" y2="12"></line>
+          </svg>
+          <span>AI Model Profiles (<span id="tab-models-count">0</span>)</span>
+        </button>
+
+        <button class="tab-btn" data-tab="guardrails-tab">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            <polyline points="9 12 11 14 15 10"></polyline>
+          </svg>
+          <span>Security & Guardrails</span>
+        </button>
+      </div>
+
+      <!-- Tab 1: Plugins Inventory -->
+      <section id="plugins-tab" class="tab-pane active">
+        <div class="panel toolbar-panel">
+          <div class="filter-group">
+            <button class="filter-pill active" data-filter="all">All Plugins</button>
+            <button class="filter-pill" data-filter="active">Active (All)</button>
+            <button class="filter-pill" data-filter="cli">Host CLI Active</button>
+            <button class="filter-pill" data-filter="docker">Docker Active</button>
+            <button class="filter-pill" data-filter="native">Native Security Tools</button>
+            <button class="filter-pill" data-filter="llm">LLM Testing</button>
+          </div>
+
+          <div class="search-wrap">
+            <div class="input-with-icon">
+              <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+              </svg>
+              <input id="plugin-search" placeholder="Search by plugin ID, capability, target…" />
+            </div>
+          </div>
+        </div>
+
+        <div id="plugins-grid" class="plugins-grid">
+          <p class="muted">Loading plugins registry…</p>
+        </div>
+      </section>
+
+      <!-- Tab 2: AI Model Profiles & Routing -->
+      <section id="models-tab" class="tab-pane">
+        
+        <!-- Intelligence Purpose Routing Matrix -->
+        <div class="panel routing-panel">
+          <div class="panel-header-simple">
+            <p class="eyebrow">INTELLIGENCE PIPELINE ROUTING</p>
+            <h3>Purpose Assignments</h3>
+            <p class="panel-sub">How AI model profiles are resolved for each phase of the intelligent security engine.</p>
+          </div>
+          
+          <div class="routing-grid" id="routing-grid">
+            <!-- Rendered by admin.js -->
+          </div>
+        </div>
+
+        <!-- Model Profiles List -->
+        <div class="panel-header-simple" style="margin-top: 24px;">
+          <p class="eyebrow">CONFIGURED MODEL PROFILES</p>
+          <h3>Model Endpoints & Parameters</h3>
+        </div>
+
+        <div id="models-grid" class="models-grid">
+          <p class="muted">Loading model profiles…</p>
+        </div>
+      </section>
+
+      <!-- Tab 3: Security Guardrails & Policy Overview -->
+      <section id="guardrails-tab" class="tab-pane">
+        <div class="guardrails-grid">
+          <div class="panel guardrail-card">
+            <div class="guardrail-icon icon-teal">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                <path d="m9 12 2 2 4-4"/>
+              </svg>
+            </div>
+            <h3>Non-Destructive Execution Guarantee</h3>
+            <p>Every admitted plugin capability is classified into authorized operations (e.g. <code>web_scan</code>, <code>static_analysis</code>, <code>port_discovery</code>, <code>llm_red_team</code>). Exploitation and destructive actions are hard-blocked by policy.</p>
+            <div class="guardrail-footer">
+              <span class="badge badge-success">Policy Active</span>
+            </div>
+          </div>
+
+          <div class="panel guardrail-card">
+            <div class="guardrail-icon icon-indigo">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+              </svg>
+            </div>
+            <h3>Target Host Whitelisting & Scope Locks</h3>
+            <p>Runtime container execution validates the target hostname against each plugin's <code>allowed_target_hosts</code> whitelist before container invocation. Out-of-scope targets trigger an immediate execution block.</p>
+            <div class="guardrail-footer">
+              <span class="badge badge-success">Host Scope Enforced</span>
+            </div>
+          </div>
+
+          <div class="panel guardrail-card">
+            <div class="guardrail-icon icon-blue">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              </svg>
+            </div>
+            <h3>Container Isolation & Mount Boundaries</h3>
+            <p>All plugin execution mounts are strictly validated against their package roots to prevent path traversal. CLI execution occurs inside hermetic container runtimes with bounded CPU, memory, and runtime limits.</p>
+            <div class="guardrail-footer">
+              <span class="badge badge-success">Mounts Hermetic</span>
+            </div>
+          </div>
+
+          <div class="panel guardrail-card">
+            <div class="guardrail-icon icon-purple">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+              </svg>
+            </div>
+            <h3>Evidence Integrity & Artifact Signatures</h3>
+            <p>Plugin stdout, stderr, and raw JSON observations are written to immutable artifact stores with SHA-256 integrity hashing and structured telemetry capture before AI evidence normalization.</p>
+            <div class="guardrail-footer">
+              <span class="badge badge-success">SHA-256 Verified</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Toast Notification -->
+    <div id="toast" role="status" class="toast"></div>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>
