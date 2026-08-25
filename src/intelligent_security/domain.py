@@ -614,6 +614,20 @@ class ReplanRecord(BaseModel):
     cumulative_reserved_cost_usd: float = Field(default=0, ge=0)
 
 
+class ReportSnapshot(BaseModel):
+    """Stored, evidence-cited report output for one immutable audit-state digest."""
+
+    report_id: UUID = Field(default_factory=uuid4)
+    report_version: str = Field(..., min_length=1, max_length=50)
+    input_digest: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+    report_digest: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+    report: dict
+    generated_at: datetime
+    model_profile_id: Optional[str] = Field(default=None, min_length=3, max_length=100)
+    model_input_digest: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    model_output_digest: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
 class FindingValidationProposal(BaseModel):
     capability: str
     contract_version: str
@@ -827,6 +841,7 @@ class Audit(BaseModel):
     candidate_findings: List[CandidateFinding] = Field(default_factory=list)
     validation_decision: Optional[ValidationDecision] = None
     replan_history: List[ReplanRecord] = Field(default_factory=list, max_length=100)
+    report_snapshot: Optional[ReportSnapshot] = None
     retest_plans: List[RetestPlan] = Field(default_factory=list)
     closed_at: Optional[datetime] = None
     closed_by: Optional[str] = None

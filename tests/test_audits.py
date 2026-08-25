@@ -753,9 +753,48 @@ def test_bounded_replan_creates_and_executes_a_new_plugin_step(tmp_path) -> None
     assert client.post(f"/audits/{created['id']}/steps/replan-01-followup/execute").status_code == 200
     assert client.post(f"/audits/{created['id']}/replan").status_code == 409
 
+    class ReportIntelligence:
+        def __init__(self):
+            self.report_calls = 0
+
+        def generate(self, purpose, system_prompt, context):
+            if purpose == "finding_validation":
+                finding = context["findings"][0]
+                return ({"analyses": [{"finding_id": finding["finding_id"], "outcome": "INCONCLUSIVE", "evidence_ids": [finding["evidence_ids"][0]], "basis": "The bounded follow-up remains inconclusive."}], "decision": "REPORT_READY", "finding_ids": [], "reason": "No further safe evidence-gathering is required."}, {"model_profile_id": "test-ai", "input_digest": "1" * 64, "output_digest": "2" * 64})
+            if purpose == "report_generation":
+                self.report_calls += 1
+                return ({"executive_summary": "Evidence-backed report summary.", "finding_guidance": []}, {"model_profile_id": "test-ai", "input_digest": "3" * 64, "output_digest": "4" * 64})
+            raise AssertionError(purpose)
+
+    # A new validation pass follows the scheduled incremental plugin execution.
+    persisted = client.app.state.audit_repository.get(created["id"])
+    persisted.validation_decision = None
+    client.app.state.audit_repository.save_with_event(persisted, "test.validation_reset", {})
+    report_intelligence = ReportIntelligence()
+    client.app.state.finding_validator.intelligence = report_intelligence
+    client.app.state.report_generator = ReportGenerator(report_intelligence)
+    assert client.post(f"/audits/{created['id']}/validation/finalize").status_code == 200
+
+    generated_report = client.post(f"/audits/{created['id']}/report/generate")
+    assert generated_report.status_code == 200
+    report_audit = generated_report.json()
+    assert report_audit["report_snapshot"]["report"]["executive_summary"]["narrative"] == "Evidence-backed report summary."
+    assert report_audit["pipeline"]["current_stage"] == "REPORT"
+    assert next(item for item in report_audit["pipeline"]["stages"] if item["stage"] == "REPORT")["status"] == "SUCCEEDED"
+    report_id = report_audit["report_snapshot"]["report_id"]
+    assert client.post(f"/audits/{created['id']}/report/generate").json()["report_snapshot"]["report_id"] == report_id
+    assert report_intelligence.report_calls == 1
+    assert client.get(f"/audits/{created['id']}/report.json").json() == report_audit["report_snapshot"]["report"]
+
+    closed = client.post(f"/audits/{created['id']}/close", json={"closed_by": "policy-engine", "reason": "Report generated and no retests remain."})
+    assert closed.status_code == 200
+    assert closed.json()["pipeline"]["current_stage"] == "CLOSED"
+
     events = client.get(f"/audits/{created['id']}/events").json()
     assert any(event["event_type"] == "validation.started" for event in events)
     assert any(event["event_type"] == "replan.approved" for event in events)
+    assert any(event["event_type"] == "report.generated" for event in events)
+    assert events[-1]["event_type"] == "audit.closed"
 
 
 def test_create_audit_rejects_invalid_scope() -> None:

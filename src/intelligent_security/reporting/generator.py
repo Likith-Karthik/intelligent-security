@@ -1,6 +1,8 @@
+import hashlib
+import json
 from datetime import datetime, timezone
 
-from intelligent_security.domain import Audit, AuditEvent, CandidateFinding, FindingState
+from intelligent_security.domain import Audit, AuditEvent, CandidateFinding, FindingState, ReportSnapshot
 from intelligent_security.intelligence.service import IntelligenceService
 
 
@@ -65,6 +67,36 @@ class ReportGenerator:
             except Exception as error:
                 raise ReportGenerationError("AI report generation failed: {}".format(error))
         return report
+
+    def input_digest(self, audit: Audit) -> str:
+        """Digest reportable facts only; report/closure bookkeeping cannot trigger regeneration."""
+        state = audit.model_dump(mode="json", exclude={"report_snapshot", "pipeline", "closed_at", "closed_by", "close_reason"})
+        serialized = json.dumps(state, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def generate_snapshot(self, audit: Audit, events: list) -> ReportSnapshot:
+        input_digest = self.input_digest(audit)
+        if audit.report_snapshot is not None and audit.report_snapshot.input_digest == input_digest:
+            return audit.report_snapshot
+        report = self.generate_json(audit, events)
+        serialized_report = json.dumps(report, sort_keys=True, separators=(",", ":"))
+        provenance = report.get("ai_provenance", {})
+        return ReportSnapshot(
+            report_version=self.report_version,
+            input_digest=input_digest,
+            report_digest=hashlib.sha256(serialized_report.encode("utf-8")).hexdigest(),
+            report=report,
+            generated_at=datetime.now(timezone.utc),
+            model_profile_id=provenance.get("model_profile_id"),
+            model_input_digest=self._digest_or_none(provenance.get("input_digest")),
+            model_output_digest=self._digest_or_none(provenance.get("output_digest")),
+        )
+
+    @staticmethod
+    def _digest_or_none(value):
+        if isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower()):
+            return value.lower()
+        return None
 
     def generate_markdown(self, report: dict) -> str:
         lines = [

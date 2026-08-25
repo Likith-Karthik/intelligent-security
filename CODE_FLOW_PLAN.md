@@ -1368,6 +1368,8 @@ flowchart TD
 
 **Done when:** A completed normal audit has a cited report and a complete event/evidence history.
 
+**POC implementation:** `POST /audits/{audit_id}/report/generate` is available in the `REPORT` stage. It creates a `ReportSnapshot` containing the report, its content digest, AI provenance, and an input-state digest; an identical reportable state returns the existing snapshot without another model call. The existing JSON and Markdown report routes return the stored snapshot when available and retain their previous read-only compatibility behavior for older Stage 1 audits. Stage 2 closure requires a successful report snapshot, terminal finding/retest states, and transitions the pipeline to `CLOSED`.
+
 ### 23.12 S2 Flow 12 — Add fail-closed Offensive boilerplate
 
 **Goal:** Model future control and persistence boundaries without enabling offensive execution.

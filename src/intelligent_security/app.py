@@ -674,11 +674,49 @@ def create_app(
             },
         )
 
+    def _generate_report_snapshot(audit: Audit, require_report_stage: bool) -> tuple[Audit, dict]:
+        """Persist and reuse a report snapshot without rerunning plugins or mutating findings."""
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        if require_report_stage and pipeline.current_stage != PipelineStage.REPORT:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Report generation requires the REPORT pipeline stage")
+        input_digest = app.state.report_generator.input_digest(audit)
+        if audit.report_snapshot is not None and audit.report_snapshot.input_digest == input_digest:
+            return audit, audit.report_snapshot.report
+        try:
+            if pipeline.current_stage == PipelineStage.REPORT:
+                progress = next(item for item in pipeline.stages if item.stage == PipelineStage.REPORT)
+                if progress.status == StageStatus.READY:
+                    app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.REPORT, status=StageStatus.RUNNING))
+            snapshot = app.state.report_generator.generate_snapshot(audit, app.state.audit_repository.list_events(audit.id))
+        except ReportGenerationError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "report_evidence_missing", "message": str(error)})
+        audit.report_snapshot = snapshot
+        if pipeline.current_stage == PipelineStage.REPORT:
+            try:
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.REPORT, status=StageStatus.SUCCEEDED))
+            except PipelineTransitionError as error:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": error.code, "message": error.message})
+        audit = app.state.audit_repository.save_with_event(
+            audit, "report.generated",
+            {"report_id": str(snapshot.report_id), "input_digest": snapshot.input_digest, "report_digest": snapshot.report_digest},
+        )
+        return audit, snapshot.report
+
+    @app.post("/audits/{audit_id}/report/generate", response_model=Audit)
+    def generate_report(audit_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        audit, _ = _generate_report_snapshot(audit, require_report_stage=True)
+        return audit
+
     @app.get("/audits/{audit_id}/report.json")
     def generate_json_report(audit_id: UUID) -> dict:
         audit = app.state.audit_repository.get(audit_id)
         if audit is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.report_snapshot is not None:
+            return audit.report_snapshot.report
         try:
             return app.state.report_generator.generate_json(audit, app.state.audit_repository.list_events(audit_id))
         except ReportGenerationError as error:
@@ -690,7 +728,7 @@ def create_app(
         if audit is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
         try:
-            report = app.state.report_generator.generate_json(audit, app.state.audit_repository.list_events(audit_id))
+            report = audit.report_snapshot.report if audit.report_snapshot is not None else app.state.report_generator.generate_json(audit, app.state.audit_repository.list_events(audit_id))
             return PlainTextResponse(app.state.report_generator.generate_markdown(report), media_type="text/markdown")
         except ReportGenerationError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "report_evidence_missing", "message": str(error)})
@@ -781,12 +819,24 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
         if audit.closed_at is not None:
             return audit
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        if audit.recon_snapshot is not None:
+            report_progress = next(item for item in pipeline.stages if item.stage == PipelineStage.REPORT)
+            if pipeline.current_stage != PipelineStage.REPORT or report_progress.status != StageStatus.SUCCEEDED or audit.report_snapshot is None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A completed report is required before closing this audit")
         unresolved = {"CANDIDATE", "VALIDATION_PENDING", "RETEST_PENDING"}
         if any(item.state.value in unresolved for item in audit.candidate_findings) or any(item.status.value != "COMPLETED" for item in audit.retest_plans):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Audit has unresolved findings or incomplete retests")
         audit.closed_at = datetime.now(timezone.utc)
         audit.closed_by = request.closed_by
         audit.close_reason = request.reason
+        if audit.recon_snapshot is not None:
+            try:
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.CLOSED, status=StageStatus.READY))
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.CLOSED, status=StageStatus.RUNNING))
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.CLOSED, status=StageStatus.SUCCEEDED))
+            except PipelineTransitionError as error:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": error.code, "message": error.message})
         return app.state.audit_repository.save_with_event(audit, "audit.closed", {"closed_by": request.closed_by, "reason": request.reason})
 
     @app.post("/audits/{audit_id}/profile", response_model=Audit)
