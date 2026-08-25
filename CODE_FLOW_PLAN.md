@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Stage 1 implemented — Stage 2 Flows 1–7 implemented |
+| Status | Stage 1 implemented — Stage 2 Flows 1–8 implemented |
 | Scope | POC implementation flow |
 | Parent document | POC Architecture |
 | Last updated | 25 August 2026 |
@@ -852,6 +852,8 @@ Each flow is complete only when it has:
 
 The existing Flows 1–13 and their persisted data form **Stage 1**, the working vertical POC. Stage 2 builds on that implementation rather than replacing it. Existing authorization, registry, model gateway, scheduling, execution, evidence, finding, reporting, and retest components remain the foundation.
 
+**Design update — AI-assisted recon evidence:** Stage 2 uses an AI-assisted, citation-constrained `ReconEvidencePack` rather than a lossy fact-only planner input. Raw artifacts remain immutable; deterministic validation remains the acceptance authority for every model-proposed fact or merge.
+
 Stage 2 groups those components into five explicit operational compartments:
 
 ```mermaid
@@ -889,8 +891,10 @@ The `plan` compartment uses the model gateway and does not invoke a target-facin
 2. Discover enabled, healthy, runtime-eligible capabilities classified as `recon`.
 3. Use a deterministic recon policy to select compatible non-destructive capabilities within the recon budget. This avoids requiring the main audit plan before its own recon input exists.
 4. Execute recon capabilities through the existing resolver, adapters, sandbox, and evidence collector.
-5. Normalize their output into versioned `recon-observation/v1` records.
-6. Merge accepted observations into an immutable `ReconSnapshot` containing assets, services, technologies, interfaces, endpoints, and explicit coverage gaps.
+5. Preserve raw output unchanged, then apply deterministic parsing/redaction and bounded chunking.
+6. Use an AI normalization model to extract rich typed facts, semantic relationships, summaries, and duplicate clusters from those chunks.
+7. Deterministically validate every proposed fact against evidence citations, checksums, canonical identifiers, field limits, and scope before accepting it.
+8. Merge accepted observations into an immutable `ReconSnapshot` containing assets, services, technologies, interfaces, endpoints, rich evidence references, and explicit coverage gaps.
 
 Recon plugins never expand authorization. A discovered hostname, address, repository path, or endpoint is recorded but cannot be scanned further unless it is already covered by the validated scope policy.
 
@@ -909,7 +913,7 @@ Recon plugins never expand authorization. A discovered hostname, address, reposi
 
 **Responsibility:** Generate a capability-level audit DAG from recon evidence.
 
-The planner receives the audit objective, scope summary, `ReconSnapshot`, executable `execute` and `validate` capability descriptors, prior validation outcomes, budgets, and coverage gaps. It never receives plugin commands, connection details, credentials, runtime allowlists, or private execution descriptors.
+The planner receives the audit objective, scope summary, `ReconSnapshot`, executable `execute` and `validate` capability descriptors, prior validation outcomes, budgets, coverage gaps, and a bounded high-detail **ReconEvidencePack**. The pack contains normalized observations, semantic relationships, summaries, and cited evidence chunks selected by relevance and context budget. It never contains plugin commands, connection details, credentials, runtime allowlists, private execution descriptors, or unbounded raw artifacts.
 
 Every generated step must reference an exact discovered capability and declare its intended evidence objective. Existing schema, dependency, scope, budget, and policy validation remains mandatory. Invalid output receives only bounded repair attempts.
 
@@ -966,8 +970,8 @@ Audit closure remains available after reporting and retest completion. Offensive
 1. Add stage-aware capability contracts and compatibility migration for existing manifests.
 2. Add `ReconRun`, `ReconObservation`, and immutable `ReconSnapshot` schemas.
 3. Build the bounded recon coordinator on the existing registry, resolver, execution, and evidence services.
-4. Add recon normalizers and at least one real non-destructive recon plugin.
-5. Add the `ReconSnapshot` to planner context and restrict the main plan to `execute` and `validate` capabilities.
+4. Add deterministic evidence chunking plus AI-assisted recon normalizers and at least one real non-destructive recon plugin.
+5. Add citation validation, semantic deduplication, and the `ReconSnapshot`/`ReconEvidencePack` to planner context; restrict the main plan to `execute` and `validate` capabilities.
 6. Introduce explicit compartment state and events while preserving Stage 1 audit IDs and evidence.
 7. Implement the bounded `Validate → Plan` evidence-gap loop.
 8. Extend autonomous UI progression through Recon, Plan, Execute, Validate, Report, and Close.
@@ -1179,16 +1183,21 @@ flowchart TD
 **Schemas:**
 
 - `ReconObservation`: type, value, parent asset, source evidence ID, confidence, first/last observed, and scope status.
-- `ReconSnapshot`: snapshot ID, audit ID, registry snapshot ID, assets, services, technologies, endpoints, interfaces, coverage gaps, evidence IDs, and creation time.
+- `ReconEvidenceChunk`: immutable evidence ID, artifact ID, chunk ID, bounded text or structured payload, SHA-256, source offsets, redaction state, and extraction eligibility.
+- `ReconObservation`: also carries source chunk IDs, field-level provenance, model confidence, semantic cluster ID, and a concise normalized summary.
+- `ReconSnapshot`: snapshot ID, audit ID, registry snapshot ID, assets, services, technologies, endpoints, interfaces, relationships, coverage gaps, evidence IDs, digest, and creation time.
+- `ReconEvidencePack`: snapshot ID, selected normalized observations, relationships, summaries, cited chunks, omissions, and context-budget accounting; it is the only recon payload supplied to the main planning model.
 
 **Processing:**
 
-1. Use package normalizers to create typed recon-observation proposals.
-2. Optionally use the `recon_normalization` model profile for heterogeneous output.
-3. Deterministically validate field types, evidence references, checksums, canonical hosts/URLs, scope status, and bounded sizes.
-4. Deduplicate observations using canonical typed keys.
-5. Freeze an immutable snapshot after every scheduled recon step reaches a terminal state.
-6. Preserve out-of-scope discoveries as informational records with `scope_status=OUT_OF_SCOPE`; exclude them from planner targets.
+1. Preserve raw evidence unchanged and create deterministic, redacted, checksummed chunks with source offsets.
+2. Use package normalizers where available, then the `recon_normalization` model profile to create rich typed observation and semantic-deduplication proposals for heterogeneous output.
+3. Require every model-proposed field, relationship, merge, or summary to cite one or more source chunks; reject unsupported facts rather than accepting model memory or inference as evidence.
+4. Deterministically validate field types, evidence references, checksums, canonical hosts/URLs, scope status, bounded sizes, and citation offsets.
+5. Use deterministic canonical keys for exact duplicates and model-proposed semantic clusters for non-identical duplicates; retain all source observations and provenance within the cluster.
+6. Build a context-budgeted `ReconEvidencePack` that prioritizes unique high-confidence facts and their supporting chunks while recording omissions.
+7. Freeze an immutable snapshot after every scheduled recon step reaches a terminal state.
+8. Preserve out-of-scope discoveries as informational records with `scope_status=OUT_OF_SCOPE`; exclude them from planner targets.
 
 **Endpoints:**
 
@@ -1208,12 +1217,15 @@ flowchart TD
 
 - Reject invented evidence IDs and malformed confidence values.
 - Canonicalize equivalent host, URL, port, and endpoint records.
+- Reject a model-proposed fact or merge without valid chunk citations.
+- Preserve distinct raw evidence when semantic deduplication clusters it.
+- Verify the evidence pack obeys its context budget and records omitted chunks.
 - Keep out-of-scope observations visible but non-executable.
 - Verify identical accepted inputs produce the same snapshot digest.
 
 **Done when:** Planning can use the `ReconSnapshot` without parsing native plugin output.
 
-**POC implementation:** Recon JSONL evidence is deterministically normalized into canonical assets, services, technologies, endpoints, and interfaces with evidence provenance and scope status. `POST /audits/{audit_id}/recon/finalize` freezes an evidence-digested `ReconSnapshot`; only in-scope facts are included in its executable planner context.
+**POC implementation:** Recon JSONL evidence is preserved, redacted, checksummed, and chunked before the `recon_normalization` model proposes rich facts and semantic clusters. The service accepts only proposals whose cited chunks contain the asserted value, then applies deterministic canonicalization, scope enforcement, and exact deduplication. `POST /audits/{audit_id}/recon/finalize` freezes both a `ReconSnapshot` and bounded `ReconEvidencePack`; a model failure is retryable and does not silently fall back to uncited free text.
 
 ### 23.7 S2 Flow 7 — Generate and approve the main AI audit plan
 
@@ -1247,7 +1259,7 @@ flowchart TD
 
 **Done when:** The approved plan is evidence-informed, capability-based, and contains no plugin-specific invocation data.
 
-**POC implementation:** When a finalized ReconSnapshot exists, `POST /audits/{audit_id}/plan/generate` refreshes the catalog using only runtime-eligible `execute` and `validate` capabilities. The planner receives the compact snapshot summary, never raw artifacts or runtime/plugin invocation data. Proposed plans retain the recon snapshot ID, and deterministic validation rejects a plan if that snapshot has changed.
+**POC implementation:** When a finalized ReconSnapshot exists, `POST /audits/{audit_id}/plan/generate` refreshes the catalog using only runtime-eligible `execute` and `validate` capabilities. The planner receives the snapshot summary plus its bounded, citation-constrained ReconEvidencePack—not runtime/plugin invocation data. Proposed plans retain the recon snapshot ID, and deterministic validation rejects a plan if that snapshot has changed.
 
 ### 23.8 S2 Flow 8 — Execute the main audit plan
 
@@ -1269,6 +1281,8 @@ flowchart TD
 **Tests:** Re-run Stage 1 scheduler, late-binding, evidence, timeout, and real-plugin integration tests under the new compartment state.
 
 **Done when:** All planned steps are terminal and every attempted invocation has an evidence or blocked-execution record.
+
+**POC implementation:** For recon-informed audits, the existing schedule and step endpoints are bound to the `EXECUTE` pipeline stage. `POST /audits/{audit_id}/steps/{step_id}/execute` revalidates scope, checks the planned registry snapshot against a fresh executable `execute`/`validate` catalog, late-binds the approved capability contract, and captures evidence through the common adapter boundary. When all main-plan steps are terminal, the pipeline advances to `VALIDATE`; unavailable or changed capabilities become structured blocked-execution records rather than substitutions.
 
 ### 23.9 S2 Flow 9 — Normalize, correlate, and validate findings
 
@@ -1300,6 +1314,8 @@ flowchart TD
 
 **Done when:** Every candidate has a traceable accepted state and the audit has one typed next decision.
 
+**POC implementation:** `POST /audits/{audit_id}/validation/finalize` is available only in the `VALIDATE` pipeline stage. It idempotently normalizes unprocessed main-execution evidence, correlates observations when necessary, and asks the `finding_validation` model profile for evidence-cited per-finding outcomes plus one audit-level decision. Local validation rejects malformed numeric fields and every invented evidence, observation, finding, or capability reference; a `VALIDATION_PENDING` finding cannot be confirmed without completed validation evidence. The endpoint records `validation.started` and `validation.decision_created`, then advances to `REPORT`, returns to `PLAN` for a future bounded replan, or enters the fail-closed `OFFENSIVE` compartment. Existing validation proposals remain restricted inputs to the later replan flow; no plugin-specific validation logic is added to the core.
+
 ### 23.10 S2 Flow 10 — Perform bounded evidence-gap replanning
 
 **Goal:** Allow intelligent follow-up testing without an unbounded autonomous loop.
@@ -1325,6 +1341,8 @@ flowchart TD
 - Verify exhaustion produces a reportable inconclusive result.
 
 **Done when:** The `Validate → Plan → Execute → Validate` loop is useful, bounded, auditable, and scope-preserving.
+
+**POC implementation:** `POST /audits/{audit_id}/replan` accepts no user-supplied plan or target data. It consumes exactly one persisted `MORE_TESTING_REQUIRED` decision while the pipeline is at `PLAN`, refreshes only runtime-eligible `execute` and `validate` capability contracts, and gives the planner only the cited inconclusive findings plus a list of prior capability-contract digests. The service enforces a maximum of three audit replans and two attempts per finding, reduces the remaining time/cost budget by previously reserved work, rejects repeated contracts, prefixes new step IDs for evidence traceability, applies normal plan policy, and schedules only automatically approved non-offensive steps. Exhaustion resolves the audit to report-ready with inconclusive findings; it cannot restart Recon or expand scope.
 
 ### 23.11 S2 Flow 11 — Generate report and close
 

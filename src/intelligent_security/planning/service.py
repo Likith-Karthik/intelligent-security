@@ -21,8 +21,8 @@ class AuditPlanner:
     def __init__(self, model_gateway: OpenAICompatibleModelGateway) -> None:
         self.model_gateway = model_gateway
 
-    def generate(self, audit: Audit, profile: ModelProfile) -> AuditPlan:
-        system_prompt, user_prompt = self._build_prompts(audit)
+    def generate(self, audit: Audit, profile: ModelProfile, replan_context: dict = None) -> AuditPlan:
+        system_prompt, user_prompt = self._build_prompts(audit, replan_context)
         last_error = None
         for attempt in range(self.max_generation_attempts):
             generated = self.model_gateway.generate_json(profile, system_prompt, user_prompt)
@@ -38,7 +38,7 @@ class AuditPlanner:
                 ).format(error.message)
         raise last_error  # pragma: no cover - the loop always returns or raises.
 
-    def _build_prompts(self, audit: Audit) -> tuple:
+    def _build_prompts(self, audit: Audit, replan_context: dict = None) -> tuple:
         if audit.target_profile is None or audit.scope_policy is None or audit.capability_discovery is None:
             raise PlanningError("missing_context", "Profile, scope policy, and capability discovery are required.")
         system_prompt = (
@@ -82,6 +82,18 @@ class AuditPlanner:
                 }
                 if audit.recon_snapshot is not None else None
             ),
+            "recon_evidence_pack": (
+                {
+                    "snapshot_id": audit.recon_evidence_pack.snapshot_id,
+                    "observations": [item.model_dump(mode="json") for item in audit.recon_evidence_pack.observations],
+                    "chunks": [
+                        {"chunk_id": item.chunk_id, "evidence_id": str(item.evidence_id), "artifact_kind": item.artifact_kind, "text": item.text}
+                        for item in audit.recon_evidence_pack.chunks
+                    ],
+                    "omitted_chunk_count": audit.recon_evidence_pack.omitted_chunk_count,
+                }
+                if audit.recon_evidence_pack is not None else None
+            ),
             "available_capabilities": [
                 {
                     "capability": candidate.capability,
@@ -95,6 +107,7 @@ class AuditPlanner:
                 }
                 for candidate in audit.capability_discovery.candidates
             ],
+            "replan_context": replan_context,
         }
         return system_prompt, json.dumps(user_context, separators=(",", ":"))
 

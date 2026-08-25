@@ -11,7 +11,7 @@ from intelligent_security.execution.adapters import ContainerCliAdapter
 from intelligent_security.execution.result import AdapterExecutionResult
 from intelligent_security.evidence.artifact_store import ArtifactStore
 from intelligent_security.evidence.collector import EvidenceCollector
-from intelligent_security.evidence.normalizer import EvidenceNormalizer
+from intelligent_security.evidence.normalizer import AIEvidenceNormalizer, EvidenceNormalizer
 from intelligent_security.findings.correlator import AIFindingCorrelator
 from intelligent_security.reporting.generator import ReportGenerator
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
@@ -27,6 +27,7 @@ from intelligent_security.domain import (
 )
 from intelligent_security.planning.service import AuditPlanner
 from intelligent_security.recon.planner import ReconPlanner, ReconPlanningError
+from intelligent_security.recon.normalizer import ReconNormalizer
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +126,24 @@ def write_main_audit_package(manifest_directory, plugin_id="test-main") -> None:
             "description": "Review approved HTTP response headers.", "target_types": ["web_application"],
             "required_operation": "web_scan", "required_inputs": ["target_profile", "scope_policy"],
             "estimated_duration_seconds": 60, "estimated_cost_usd": 0, "reliability": 0.9,
+        }],
+    }), encoding="utf-8")
+    (package_directory / "execution.json").write_text(json.dumps({
+        "adapter": "container_cli", "target_input": "url", "arguments": ["review", "{{target.url}}"],
+        "output_format": "jsonl",
+    }), encoding="utf-8")
+
+
+def write_incremental_audit_package(manifest_directory, plugin_id="test-followup") -> None:
+    package_directory = manifest_directory / plugin_id
+    package_directory.mkdir(parents=True)
+    (package_directory / "manifest.json").write_text(json.dumps({
+        "plugin_id": plugin_id, "plugin_version": "1", "adapter": "container_cli",
+        "enabled": True, "health": "declared_healthy", "capabilities": [{
+            "capability": "web.incremental_review", "contract_version": "1", "stage": "execute",
+            "description": "Gather an additional non-destructive HTTP evidence sample.", "target_types": ["web_application"],
+            "required_operation": "web_scan", "required_inputs": ["target_profile", "scope_policy"],
+            "estimated_duration_seconds": 60, "estimated_cost_usd": 0, "reliability": 0.8,
         }],
     }), encoding="utf-8")
     (package_directory / "execution.json").write_text(json.dumps({
@@ -603,9 +622,20 @@ def test_main_plan_uses_finalized_recon_snapshot_and_executable_plugin_catalog(t
             self.prompt = user_prompt
             return {"steps": [{"id": "headers", "capability": "web.header_review", "depends_on": [], "inputs": {}, "reason": "Review the reachable recon interface."}]}
 
+    class ReconIntelligence:
+        def generate(self, purpose, system_prompt, context):
+            assert purpose == "recon_normalization"
+            assert context["chunks"]
+            return ({"observations": [{
+                "observation_type": "technology", "value": "Caddy", "parent_asset": "staging.example.test",
+                "confidence": 0.95, "source_chunk_ids": [context["chunks"][0]["chunk_id"]],
+                "normalized_summary": "Caddy was observed in the response header.", "semantic_cluster_id": "technology:caddy",
+            }]}, {"model_profile_id": "test-recon-normalizer", "input_digest": "input", "output_digest": "output"})
+
     gateway = ModelGateway()
     app.state.execution_service.adapters["container_cli"] = PluginAdapter()
     app.state.audit_planner = AuditPlanner(gateway)
+    app.state.recon_normalizer = ReconNormalizer(ReconIntelligence())
     client = TestClient(app)
     request = valid_request()
     request["authorization"]["allowed_operations"] = ["port_discovery", "web_scan"]
@@ -620,17 +650,112 @@ def test_main_plan_uses_finalized_recon_snapshot_and_executable_plugin_catalog(t
 
     generated = client.post(f"/audits/{created['id']}/plan/generate")
     validated = client.post(f"/audits/{created['id']}/plan/validate")
+    scheduled = client.post(f"/audits/{created['id']}/plan/schedule")
+    main_executed = client.post(f"/audits/{created['id']}/steps/headers/execute")
 
     assert finalized.status_code == 200
     assert generated.status_code == 200
     assert validated.status_code == 200
-    audit = validated.json()
+    assert scheduled.status_code == 200
+    assert main_executed.status_code == 200
+    audit = main_executed.json()
     assert audit["recon_snapshot"]["assets"] == ["staging.example.test"]
+    assert audit["recon_evidence_pack"]["chunks"]
+    assert audit["recon_evidence_pack"]["observations"]
     assert audit["audit_plan"]["recon_snapshot_id"] == audit["recon_snapshot"]["snapshot_id"]
     assert [candidate["capability"] for candidate in audit["capability_discovery"]["candidates"]] == ["web.header_review"]
     assert "staging.example.test" in gateway.prompt
-    assert "stdout" not in gateway.prompt
+    assert "runtime_reference" not in gateway.prompt
+    assert "invocation" not in gateway.prompt
+    assert "recon_evidence_pack" in gateway.prompt
     assert audit["plan_validation"]["status"] == "APPROVED"
+    assert audit["plugin_executions"][-1]["capability"] == "web.header_review"
+    assert audit["pipeline"]["current_stage"] == "VALIDATE"
+
+
+def test_bounded_replan_creates_and_executes_a_new_plugin_step(tmp_path) -> None:
+    """Flow 10 consumes one evidence-gap decision and cannot repeat the original contract."""
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    write_main_audit_package(manifests)
+    write_incremental_audit_package(manifests)
+    runtimes = tmp_path / "runtimes.json"
+    runtimes.write_text(json.dumps({"plugins": [
+        {"plugin_id": "test-recon", "adapter": "container_cli", "runtime_reference": "container-config://recon", "allowed_target_hosts": ["staging.example.test"], "enabled": True},
+        {"plugin_id": "test-main", "adapter": "container_cli", "runtime_reference": "container-config://main", "allowed_target_hosts": ["staging.example.test"], "enabled": True},
+        {"plugin_id": "test-followup", "adapter": "container_cli", "runtime_reference": "container-config://followup", "allowed_target_hosts": ["staging.example.test"], "enabled": True},
+    ]}), encoding="utf-8")
+    app = create_app(str(tmp_path / "audits.db"), plugin_manifest_directory=str(manifests), plugin_runtime_profiles_path=str(runtimes), evidence_directory=str(tmp_path / "evidence"))
+
+    class PluginAdapter:
+        def execute(self, runtime, audit, step, package):
+            return AdapterExecutionResult(invocation=["test", step.capability], exit_code=0, stdout="header review output\n")
+
+    class Gateway:
+        def generate_json(self, profile, system_prompt, user_prompt):
+            if '"source_validation_decision"' in user_prompt:
+                return {"steps": [{"id": "followup", "capability": "web.incremental_review", "depends_on": [], "inputs": {}, "reason": "Collect the missing evidence."}]}
+            return {"steps": [{"id": "headers", "capability": "web.header_review", "depends_on": [], "inputs": {}, "reason": "Review headers."}]}
+
+    class Intelligence:
+        def generate(self, purpose, system_prompt, context):
+            if purpose == "recon_normalization":
+                return ({"observations": [{"observation_type": "technology", "value": "Caddy", "parent_asset": "staging.example.test", "confidence": 0.9, "source_chunk_ids": [context["chunks"][0]["chunk_id"]]}]}, {"model_profile_id": "test-ai", "input_digest": "input", "output_digest": "output"})
+            if purpose == "observation_normalization":
+                return ({"observations": [{"category": "http", "title": "Missing CSP", "description": "No CSP header.", "affected_asset": "staging.example.test", "location": "https://staging.example.test/", "severity_reported": "medium", "confidence": 0.9, "identifiers": ["CWE-693"], "evidence_artifact_ids": context["allowed_artifact_ids"], "tool_metadata": {}}]}, {"model_profile_id": "test-ai", "input_digest": "a" * 64, "output_digest": "b" * 64})
+            if purpose == "finding_correlation":
+                observation = context["observations"][0]
+                return ({"findings": [{"observation_ids": [observation["observation_id"]], "evidence_ids": [observation["evidence_id"]], "category": "http", "title": "Missing CSP", "affected_asset": "staging.example.test", "location": "https://staging.example.test/", "severity_reported": "medium", "confidence": 0.9, "rationale": "Evidence linked."}]}, {"model_profile_id": "test-ai", "input_digest": "c" * 64, "output_digest": "d" * 64})
+            if purpose == "finding_validation":
+                finding = context["findings"][0]
+                evidence_id = finding["evidence_ids"][0]
+                return ({"analyses": [{"finding_id": finding["finding_id"], "outcome": "INCONCLUSIVE", "evidence_ids": [evidence_id], "basis": "An additional independent check is required."}], "decision": "MORE_TESTING_REQUIRED", "finding_ids": [finding["finding_id"]], "reason": "The evidence gap needs one additional check."}, {"model_profile_id": "test-ai", "input_digest": "e" * 64, "output_digest": "f" * 64})
+            raise AssertionError(purpose)
+
+    app.state.execution_service.adapters["container_cli"] = PluginAdapter()
+    app.state.audit_planner = AuditPlanner(Gateway())
+    intelligence = Intelligence()
+    app.state.recon_normalizer = ReconNormalizer(intelligence)
+    app.state.evidence_normalizer = AIEvidenceNormalizer(ArtifactStore(str(tmp_path / "evidence")), intelligence)
+    app.state.finding_correlator = AIFindingCorrelator(intelligence)
+    app.state.finding_validator.intelligence = intelligence
+    client = TestClient(app)
+    request = valid_request()
+    request["authorization"]["allowed_operations"] = ["port_discovery", "web_scan"]
+    created = prepare_recon_audit(client, request)
+    for endpoint in ["recon/capabilities/discover", "recon/plan", "recon/schedule", "recon/steps/recon-01/execute"]:
+        assert client.post(f"/audits/{created['id']}/{endpoint}").status_code == 200
+    recon_evidence = client.get(f"/audits/{created['id']}").json()["raw_evidence"][-1]["evidence_id"]
+    assert client.post(f"/audits/{created['id']}/recon/evidence/{recon_evidence}/normalize").status_code == 200
+    assert client.post(f"/audits/{created['id']}/recon/finalize").status_code == 200
+    assert client.post(f"/audits/{created['id']}/plan/generate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/plan/validate").status_code == 200
+    assert client.post(f"/audits/{created['id']}/plan/schedule").status_code == 200
+    assert client.post(f"/audits/{created['id']}/steps/headers/execute").status_code == 200
+
+    finalized = client.post(f"/audits/{created['id']}/validation/finalize")
+    assert finalized.status_code == 200
+    audit = finalized.json()
+    assert audit["candidate_findings"][0]["state"] == "INCONCLUSIVE"
+    assert audit["validation_decision"]["decision"] == "MORE_TESTING_REQUIRED"
+    assert audit["pipeline"]["current_stage"] == "PLAN"
+    assert client.post(f"/audits/{created['id']}/validation/finalize").json()["validation_decision"] == audit["validation_decision"]
+
+    replanned = client.post(f"/audits/{created['id']}/replan")
+    assert replanned.status_code == 200
+    audit = replanned.json()
+    assert audit["pipeline"]["current_stage"] == "EXECUTE"
+    assert audit["replan_history"][-1]["attempt"] == 1
+    assert audit["replan_history"][-1]["cumulative_reserved_duration_seconds"] == 120
+    assert audit["replan_history"][-1]["cumulative_reserved_cost_usd"] == 0
+    assert audit["execution_schedule"]["steps"][0]["plan_step_id"] == "replan-01-followup"
+    assert audit["execution_schedule"]["steps"][0]["capability"] == "web.incremental_review"
+    assert client.post(f"/audits/{created['id']}/steps/replan-01-followup/execute").status_code == 200
+    assert client.post(f"/audits/{created['id']}/replan").status_code == 409
+
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert any(event["event_type"] == "validation.started" for event in events)
+    assert any(event["event_type"] == "replan.approved" for event in events)
 
 
 def test_create_audit_rejects_invalid_scope() -> None:

@@ -19,6 +19,10 @@ from .domain import (
     PlanApprovalRequest,
     PlanValidationStatus,
     FindingValidationRequest,
+    ReplanRecord,
+    ReplanStatus,
+    ValidationDecision,
+    ValidationDecisionType,
     RetestCreateRequest,
     RetestApprovalRequest,
     AuditCloseRequest,
@@ -34,7 +38,7 @@ from .evidence.artifact_store import ArtifactStore
 from .evidence.collector import EvidenceCollector
 from .evidence.normalizer import AIEvidenceNormalizer
 from .findings.correlator import AIFindingCorrelator
-from .findings.service import FindingService, FindingServiceError
+from .findings.service import AIFindingValidator, FindingService, FindingServiceError, ValidationFinalizationError
 from .intelligence.service import IntelligenceService
 from .findings.retest import RetestError, RetestService
 from .reporting.generator import ReportGenerationError, ReportGenerator
@@ -50,10 +54,11 @@ from .recon.scheduling import (
     schedule_recon_plan,
 )
 from .recon.normalizer import ReconNormalizer, ReconNormalizationError
-from .recon.snapshot import ReconSnapshotError, create_recon_snapshot
+from .recon.snapshot import ReconSnapshotError, create_recon_evidence_pack, create_recon_snapshot
 from .planning.model_gateway import ModelGatewayError, OpenAICompatibleModelGateway
 from .planning.model_profiles import ModelProfileError, ModelProfileRegistry
 from .planning.service import AuditPlanner, PlanningError
+from .planning.replan import ReplanError, ReplanService
 from .profiling.service import TargetProfilingError, profile_target
 from .registry.service import CapabilityRegistry, RegistryError
 from .repository import AuditRepository
@@ -76,6 +81,7 @@ def create_app(
     app.state.model_profile_registry = ModelProfileRegistry(model_profiles_path)
     app.state.intelligence_service = IntelligenceService(app.state.model_profile_registry)
     app.state.audit_planner = AuditPlanner(OpenAICompatibleModelGateway())
+    app.state.replan_service = ReplanService()
     app.state.evidence_store = ArtifactStore(evidence_directory or os.getenv("EVIDENCE_DIRECTORY", "data/evidence"))
     app.state.execution_service = ExecutionService(
         PluginRuntimeProfileRegistry(plugin_runtime_profiles_path),
@@ -85,13 +91,14 @@ def create_app(
     app.state.evidence_normalizer = AIEvidenceNormalizer(app.state.evidence_store, app.state.intelligence_service)
     app.state.finding_correlator = AIFindingCorrelator(app.state.intelligence_service)
     app.state.finding_service = FindingService()
+    app.state.finding_validator = AIFindingValidator(app.state.intelligence_service)
     app.state.retest_service = RetestService()
     app.state.report_generator = ReportGenerator(app.state.intelligence_service)
     app.state.audit_pipeline_service = AuditPipelineService()
     app.state.recon_discovery_service = ReconDiscoveryService()
     app.state.recon_policy = default_recon_policy()
     app.state.recon_planner = ReconPlanner()
-    app.state.recon_normalizer = ReconNormalizer()
+    app.state.recon_normalizer = ReconNormalizer(app.state.intelligence_service)
 
     @app.get("/", include_in_schema=False)
     def audit_console() -> FileResponse:
@@ -257,7 +264,7 @@ def create_app(
         except Exception:
             pass
 
-        purposes = ["audit_planning", "evidence_normalization", "finding_correlation", "report_generation"]
+        purposes = ["audit_planning", "evidence_normalization", "finding_correlation", "finding_validation", "report_generation"]
         assignments = {}
         for purpose in purposes:
             try:
@@ -505,6 +512,139 @@ def create_app(
                 "candidate_count": len(audit.candidate_findings),
                 "validation_pending_count": sum(item.state.value == "VALIDATION_PENDING" for item in audit.candidate_findings),
             },
+        )
+
+    @app.post("/audits/{audit_id}/validation/finalize", response_model=Audit)
+    def finalize_validation(audit_id: UUID) -> Audit:
+        """Complete AI normalization, correlation, and an evidence-constrained validation decision."""
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.validation_decision is not None:
+            return audit
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        if pipeline.current_stage != PipelineStage.VALIDATE:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Validation finalization requires the VALIDATE pipeline stage")
+        try:
+            if next(item for item in pipeline.stages if item.stage == PipelineStage.VALIDATE).status == StageStatus.READY:
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.VALIDATE, status=StageStatus.RUNNING))
+            audit = app.state.audit_repository.save_with_event(audit, "validation.started", {"evidence_count": len(audit.raw_evidence)})
+            normalized = {item.evidence_id for item in audit.observation_normalizations if item.status.value == "SUCCEEDED"}
+            for evidence in audit.raw_evidence:
+                if evidence.evidence_id in normalized:
+                    continue
+                package = app.state.capability_registry.active_snapshot().package_for_plugin(evidence.plugin_id or "")
+                result, observations = app.state.evidence_normalizer.normalize(audit, evidence, package)
+                audit.observation_normalizations.append(result)
+                audit.observations.extend(observations)
+            if not audit.candidate_findings:
+                audit.candidate_findings = app.state.finding_correlator.correlate(audit)
+            audit.validation_decision = app.state.finding_validator.finalize(audit)
+        except ValidationFinalizationError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": error.code, "message": error.message})
+        except Exception as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": "validation_failed", "message": str(error)})
+
+        decision = audit.validation_decision
+        try:
+            app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.VALIDATE, status=StageStatus.SUCCEEDED, reason=decision.decision.value))
+            next_stage = PipelineStage.REPORT if decision.decision == ValidationDecisionType.REPORT_READY else (
+                PipelineStage.PLAN if decision.decision == ValidationDecisionType.MORE_TESTING_REQUIRED else PipelineStage.OFFENSIVE
+            )
+            app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=next_stage, status=StageStatus.READY, reason=decision.reason))
+        except PipelineTransitionError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": error.code, "message": error.message})
+        return app.state.audit_repository.save_with_event(
+            audit, "validation.decision_created",
+            {"decision": decision.decision.value, "finding_ids": [str(item) for item in decision.finding_ids]},
+        )
+
+    @app.post("/audits/{audit_id}/replan", response_model=Audit)
+    def replan_audit(audit_id: UUID) -> Audit:
+        """Turn one evidence-gap decision into a single, policy-checked incremental schedule."""
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        if pipeline.current_stage != PipelineStage.PLAN:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Replanning requires the PLAN pipeline stage")
+        try:
+            validated_scope = validate_scope(audit)
+            if audit.scope_policy is None or validated_scope.model_dump(mode="json") != audit.scope_policy.model_dump(mode="json"):
+                raise ReplanError("scope_changed", "Audit scope changed; revalidate scope and start a new planning cycle.")
+            eligible_plugin_ids = app.state.execution_service.executable_plugin_ids(audit, app.state.capability_registry)
+            discovery = app.state.capability_registry.discover(
+                audit, eligible_plugin_ids=eligible_plugin_ids,
+                stages={CapabilityStage.EXECUTE, CapabilityStage.VALIDATE},
+            )
+            profile = app.state.model_profile_registry.select_planner_profile(audit.planner_model_profile)
+            if next(item for item in pipeline.stages if item.stage == PipelineStage.PLAN).status == StageStatus.READY:
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.PLAN, status=StageStatus.RUNNING))
+            audit = app.state.audit_repository.save_with_event(audit, "replan.requested", {"decision_id": str(audit.validation_decision.decision_id) if audit.validation_decision else None})
+            plan, record = app.state.replan_service.create(audit, discovery, app.state.audit_planner, profile)
+            audit.capability_discovery = discovery
+            audit.capabilities_discovered_at = discovery.discovered_at
+            audit.audit_plan = plan
+            audit.plan_proposed_at = plan.generated_at
+            audit.state = AuditState.PLAN_PROPOSED
+            validation = validate_plan(audit)
+            if validation.status != PlanValidationStatus.APPROVED:
+                raise ReplanError("replan_requires_approval", "Incremental plans requiring human approval are not automatically scheduled.")
+            audit.plan_validation = validation
+            audit.plan_validated_at = validation.validated_at
+            audit.plan_approved_at = validation.validated_at
+            audit.plan_approved_by = "policy-engine"
+            audit.state = AuditState.PLAN_APPROVED
+            previously_reserved_duration, previously_reserved_cost = app.state.replan_service._reserved_budget(audit)
+            audit.execution_schedule = schedule_plan(audit)
+            audit.plan_scheduled_at = audit.execution_schedule.scheduled_at
+            audit.state = AuditState.PLAN_SCHEDULED
+            record = record.model_copy(update={
+                "reserved_duration_seconds": audit.execution_schedule.reserved_duration_seconds,
+                "reserved_cost_usd": audit.execution_schedule.reserved_cost_usd,
+                "cumulative_reserved_duration_seconds": previously_reserved_duration + audit.execution_schedule.reserved_duration_seconds,
+                "cumulative_reserved_cost_usd": previously_reserved_cost + audit.execution_schedule.reserved_cost_usd,
+            })
+            audit.replan_history.append(record)
+            app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.PLAN, status=StageStatus.SUCCEEDED))
+            app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.EXECUTE, status=StageStatus.READY))
+        except (RegistryError, ExecutionError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"code": "main_capability_discovery_failed", "message": str(error)})
+        except ModelProfileError as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"code": "model_profile_unavailable", "message": str(error)})
+        except ModelGatewayError as error:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"code": error.code, "message": error.message})
+        except ReplanError as error:
+            if error.code in {"replan_limit_exhausted", "finding_replan_limit_exhausted", "no_incremental_capability", "replan_budget_exhausted"}:
+                prior = audit.validation_decision
+                audit.validation_decision = ValidationDecision(
+                    decision=ValidationDecisionType.REPORT_READY,
+                    finding_ids=prior.finding_ids,
+                    reason="Replanning exhausted: {}".format(error.message),
+                    created_at=datetime.now(timezone.utc), model_profile_id=prior.model_profile_id,
+                    input_digest=prior.input_digest, output_digest=prior.output_digest,
+                )
+                audit.replan_history.append(ReplanRecord(
+                    source_decision_id=prior.decision_id, attempt=len(audit.replan_history) + 1,
+                    finding_ids=prior.finding_ids, status=ReplanStatus.EXHAUSTED,
+                    reason=error.message, created_at=datetime.now(timezone.utc),
+                ))
+                try:
+                    app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.PLAN, status=StageStatus.SUCCEEDED, reason="replan_exhausted"))
+                    app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.REPORT, status=StageStatus.READY, reason=error.message))
+                except PipelineTransitionError:
+                    pass
+                return app.state.audit_repository.save_with_event(audit, "replan.exhausted", {"code": error.code, "message": error.message})
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": error.code, "message": error.message})
+        except ScopeValidationError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": error.code, "message": error.message})
+        except (PlanningError, PlanPolicyError, ScheduleError) as error:
+            code = getattr(error, "code", "replan_failed")
+            message = getattr(error, "message", str(error))
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": code, "message": message})
+        return app.state.audit_repository.save_with_event(
+            audit, "replan.approved",
+            {"replan_id": str(record.replan_id), "attempt": record.attempt, "step_count": len(audit.execution_schedule.steps)},
         )
 
     @app.post("/audits/{audit_id}/findings/{finding_id}/validation", response_model=Audit)
@@ -902,14 +1042,19 @@ def create_app(
         if audit is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
         try:
-            observations = app.state.recon_normalizer.normalize(audit, evidence_id, app.state.evidence_store)
+            observations, chunks, provenance = app.state.recon_normalizer.normalize(audit, evidence_id, app.state.evidence_store)
         except ReconNormalizationError as error:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": error.code, "message": error.message})
+            raise HTTPException(
+                status_code=(status.HTTP_503_SERVICE_UNAVAILABLE if error.code == "model_normalization_failed" else status.HTTP_422_UNPROCESSABLE_CONTENT),
+                detail={"code": error.code, "message": error.message},
+            )
         existing = {(item.observation_type, item.value, item.parent_asset, item.source_evidence_id) for item in audit.recon_observations}
         accepted = [item for item in observations if (item.observation_type, item.value, item.parent_asset, item.source_evidence_id) not in existing]
         audit.recon_observations.extend(accepted)
+        known_chunks = {item.chunk_id for item in audit.recon_evidence_chunks}
+        audit.recon_evidence_chunks.extend(item for item in chunks if item.chunk_id not in known_chunks)
         return app.state.audit_repository.save_with_event(
-            audit, "recon.observation_accepted", {"evidence_id": str(evidence_id), "accepted_count": len(accepted)}
+            audit, "recon.observation_accepted", {"evidence_id": str(evidence_id), "accepted_count": len(accepted), "chunk_count": len(chunks), "model_profile_id": provenance.get("model_profile_id")}
         )
 
     @app.post("/audits/{audit_id}/recon/finalize", response_model=Audit)
@@ -924,6 +1069,16 @@ def create_app(
         except ReconSnapshotError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": error.code, "message": error.message})
         audit.recon_snapshot = snapshot
+        audit.recon_evidence_pack = create_recon_evidence_pack(audit, snapshot)
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        if pipeline.current_stage == PipelineStage.RECON:
+            try:
+                if next(item for item in pipeline.stages if item.stage == PipelineStage.RECON).status == StageStatus.READY:
+                    app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.RECON, status=StageStatus.RUNNING))
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.RECON, status=StageStatus.SUCCEEDED))
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.PLAN, status=StageStatus.READY))
+            except PipelineTransitionError:
+                pass
         return app.state.audit_repository.save_with_event(
             audit, "recon.snapshot_created", {"snapshot_id": snapshot.snapshot_id, "digest": snapshot.digest, "evidence_count": len(snapshot.evidence_ids)}
         )
@@ -954,6 +1109,11 @@ def create_app(
             )
         try:
             if audit.recon_snapshot is not None:
+                pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+                if pipeline.current_stage != PipelineStage.PLAN:
+                    raise PlanningError("invalid_pipeline_stage", "Main planning requires the PLAN pipeline stage.")
+                if next(item for item in pipeline.stages if item.stage == PipelineStage.PLAN).status == StageStatus.READY:
+                    app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.PLAN, status=StageStatus.RUNNING))
                 eligible_plugin_ids = app.state.execution_service.executable_plugin_ids(audit, app.state.capability_registry)
                 audit.capability_discovery = app.state.capability_registry.discover(
                     audit, eligible_plugin_ids=eligible_plugin_ids,
@@ -1043,6 +1203,12 @@ def create_app(
         audit.state = AuditState.PLAN_APPROVED
         audit.plan_approved_at = validation.validated_at
         audit.plan_approved_by = "policy-engine"
+        if audit.recon_snapshot is not None:
+            try:
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.PLAN, status=StageStatus.SUCCEEDED))
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.EXECUTE, status=StageStatus.READY))
+            except PipelineTransitionError:
+                pass
         return app.state.audit_repository.save_with_event(
             audit,
             "plan.approved",
@@ -1073,6 +1239,12 @@ def create_app(
         audit.state = AuditState.PLAN_APPROVED
         audit.plan_approved_at = datetime.now(timezone.utc)
         audit.plan_approved_by = request.reviewed_by
+        if audit.recon_snapshot is not None:
+            try:
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.PLAN, status=StageStatus.SUCCEEDED))
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.EXECUTE, status=StageStatus.READY))
+            except PipelineTransitionError:
+                pass
         return app.state.audit_repository.save_with_event(
             audit,
             "plan.approved",
@@ -1091,6 +1263,10 @@ def create_app(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Audit plan cannot be scheduled before approval",
             )
+        if audit.recon_snapshot is not None:
+            pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+            if pipeline.current_stage != PipelineStage.EXECUTE:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Main audit scheduling requires the EXECUTE pipeline stage")
         try:
             execution_schedule = schedule_plan(audit)
         except ScheduleError as error:
@@ -1130,9 +1306,25 @@ def create_app(
         )
         if step is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled step not found")
+        if audit.recon_snapshot is not None:
+            try:
+                validated_scope = validate_scope(audit)
+            except ScopeValidationError as error:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": error.code, "message": error.message})
+            if audit.scope_policy is None or validated_scope.model_dump(mode="json") != audit.scope_policy.model_dump(mode="json"):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Audit scope changed; replan required")
+            pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+            if pipeline.current_stage != PipelineStage.EXECUTE:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Main execution requires the EXECUTE pipeline stage")
+            if next(item for item in pipeline.stages if item.stage == PipelineStage.EXECUTE).status == StageStatus.READY:
+                try:
+                    app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.EXECUTE, status=StageStatus.RUNNING))
+                except PipelineTransitionError:
+                    pass
         try:
-            execution = app.state.execution_service.execute(
-                audit, step, app.state.capability_registry
+            execution = (
+                app.state.execution_service.execute_main(audit, step, app.state.capability_registry, audit.execution_schedule.registry_snapshot_id)
+                if audit.recon_snapshot is not None else app.state.execution_service.execute(audit, step, app.state.capability_registry)
             )
         except ExecutionError as error:
             if error.code == "capability_unavailable":
@@ -1174,6 +1366,15 @@ def create_app(
                     and set(scheduled_step.depends_on).issubset(succeeded_step_ids)
                 ):
                     scheduled_step.status = ScheduledStepStatus.READY
+        if audit.recon_snapshot is not None and all(
+            item.status in {ScheduledStepStatus.SUCCEEDED, ScheduledStepStatus.FAILED, ScheduledStepStatus.CAPABILITY_UNAVAILABLE}
+            for item in audit.execution_schedule.steps
+        ):
+            try:
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.EXECUTE, status=StageStatus.SUCCEEDED))
+                app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.VALIDATE, status=StageStatus.READY))
+            except PipelineTransitionError:
+                pass
         event_type = "step.completed" if execution.status == PluginExecutionStatus.SUCCEEDED else "step.failed"
         return app.state.audit_repository.save_with_event(
             audit,

@@ -391,6 +391,11 @@ function renderModelProfiles(profiles, assignments) {
         desc: "Aggregates observations across multiple plugins to deduplicate and validate candidate vulnerabilities.",
         icon: "polyline",
       },
+      finding_validation: {
+        title: "Finding Validation",
+        desc: "Issues evidence-cited finding outcomes and selects the next bounded audit action.",
+        icon: "shield-check",
+      },
       report_generation: {
         title: "Report Generation",
         desc: "Compiles evidence-backed findings into executive summaries and structured JSON / Markdown deliverables.",

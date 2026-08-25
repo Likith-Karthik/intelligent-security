@@ -426,6 +426,31 @@ class ReconObservation(BaseModel):
     first_observed_at: datetime
     last_observed_at: datetime
     scope_status: ReconScopeStatus
+    source_chunk_ids: List[str] = Field(default_factory=list, max_length=100)
+    normalized_summary: Optional[str] = Field(default=None, max_length=2000)
+    semantic_cluster_id: Optional[str] = Field(default=None, max_length=200)
+    model_assisted: bool = False
+
+
+class ReconEvidenceChunk(BaseModel):
+    chunk_id: str = Field(..., pattern=r"^chunk-[a-f0-9]{16}$")
+    evidence_id: UUID
+    artifact_kind: str = Field(..., min_length=1, max_length=100)
+    sha256: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+    source_artifact_sha256: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+    start_offset: int = Field(..., ge=0)
+    end_offset: int = Field(..., ge=0)
+    text: str = Field(..., min_length=1, max_length=12000)
+    redacted: bool = True
+
+
+class ReconEvidencePack(BaseModel):
+    snapshot_id: str
+    observations: List[ReconObservation] = Field(default_factory=list, max_length=5000)
+    chunks: List[ReconEvidenceChunk] = Field(default_factory=list, max_length=200)
+    omitted_chunk_count: int = Field(default=0, ge=0)
+    character_budget: int = Field(..., ge=1)
+    included_characters: int = Field(..., ge=0)
 
 
 class ReconSnapshot(BaseModel):
@@ -543,6 +568,50 @@ class FindingValidationOutcome(str, Enum):
     CONFIRMED = "CONFIRMED"
     REJECTED = "REJECTED"
     INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class ValidationDecisionType(str, Enum):
+    """The bounded next action selected after evidence-based validation."""
+
+    REPORT_READY = "REPORT_READY"
+    MORE_TESTING_REQUIRED = "MORE_TESTING_REQUIRED"
+    OFFENSIVE_PERMISSION_REQUIRED = "OFFENSIVE_PERMISSION_REQUIRED"
+
+
+class ValidationDecision(BaseModel):
+    """Immutable provenance for the audit-level conclusion of the VALIDATE stage."""
+
+    decision_id: UUID = Field(default_factory=uuid4)
+    decision: ValidationDecisionType
+    finding_ids: List[UUID] = Field(default_factory=list, max_length=1000)
+    reason: str = Field(..., min_length=3, max_length=4000)
+    created_at: datetime
+    model_profile_id: str = Field(..., min_length=3, max_length=100)
+    input_digest: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+    output_digest: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+
+
+class ReplanStatus(str, Enum):
+    SCHEDULED = "SCHEDULED"
+    EXHAUSTED = "EXHAUSTED"
+
+
+class ReplanRecord(BaseModel):
+    """Audit trail for one bounded, evidence-gap-driven incremental plan."""
+
+    replan_id: UUID = Field(default_factory=uuid4)
+    source_decision_id: UUID
+    attempt: int = Field(..., ge=1, le=100)
+    finding_ids: List[UUID] = Field(..., min_length=1, max_length=1000)
+    prior_step_digests: List[str] = Field(default_factory=list, max_length=1000)
+    new_step_digests: List[str] = Field(default_factory=list, max_length=100)
+    status: ReplanStatus
+    reason: str = Field(..., min_length=3, max_length=4000)
+    created_at: datetime
+    reserved_duration_seconds: int = Field(default=0, ge=0)
+    reserved_cost_usd: float = Field(default=0, ge=0)
+    cumulative_reserved_duration_seconds: int = Field(default=0, ge=0)
+    cumulative_reserved_cost_usd: float = Field(default=0, ge=0)
 
 
 class FindingValidationProposal(BaseModel):
@@ -737,7 +806,9 @@ class Audit(BaseModel):
     recon_execution_schedule: Optional[ReconExecutionSchedule] = None
     recon_plan_scheduled_at: Optional[datetime] = None
     recon_observations: List[ReconObservation] = Field(default_factory=list)
+    recon_evidence_chunks: List[ReconEvidenceChunk] = Field(default_factory=list)
     recon_snapshot: Optional[ReconSnapshot] = None
+    recon_evidence_pack: Optional[ReconEvidencePack] = None
     capability_discovery: Optional[CapabilityDiscovery] = None
     capabilities_discovered_at: Optional[datetime] = None
     planner_model_profile: Optional[str] = None
@@ -754,6 +825,8 @@ class Audit(BaseModel):
     observations: List[Observation] = Field(default_factory=list)
     observation_normalizations: List[ObservationNormalization] = Field(default_factory=list)
     candidate_findings: List[CandidateFinding] = Field(default_factory=list)
+    validation_decision: Optional[ValidationDecision] = None
+    replan_history: List[ReplanRecord] = Field(default_factory=list, max_length=100)
     retest_plans: List[RetestPlan] = Field(default_factory=list)
     closed_at: Optional[datetime] = None
     closed_by: Optional[str] = None

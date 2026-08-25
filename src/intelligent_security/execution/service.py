@@ -86,6 +86,27 @@ class ExecutionService:
         candidate, runtime, package = self._resolve(audit, step, current_discovery.candidates, profiles, registry)
         return self._run_resolved(audit, step, current_discovery, candidate, runtime, package, started_at)
 
+    def execute_main(
+        self, audit: Audit, step: ScheduledStep, registry: CapabilityRegistry, expected_snapshot_id: str
+    ) -> PluginExecution:
+        """Execute a Stage 2 main-plan step against its approved executable catalog."""
+        if step.status != ScheduledStepStatus.READY:
+            raise ExecutionError("step_not_ready", "Main audit step {} is not ready for execution.".format(step.plan_step_id))
+        started_at = datetime.now(timezone.utc)
+        try:
+            eligible_plugin_ids = self.executable_plugin_ids(audit, registry)
+            discovery = registry.discover(
+                audit, eligible_plugin_ids=eligible_plugin_ids,
+                stages={CapabilityStage.EXECUTE, CapabilityStage.VALIDATE},
+            )
+            profiles = self.runtime_profiles.load()
+        except (RegistryError, RuntimeProfileError) as error:
+            raise ExecutionError("runtime_configuration_error", str(error))
+        if discovery.registry_snapshot_id != expected_snapshot_id:
+            raise ExecutionError("registry_snapshot_mismatch", "Main execution catalog changed after planning; replan required.")
+        candidate, runtime, package = self._resolve(audit, step, discovery.candidates, profiles, registry)
+        return self._run_resolved(audit, step, discovery, candidate, runtime, package, started_at)
+
     def _run_resolved(
         self,
         audit: Audit,

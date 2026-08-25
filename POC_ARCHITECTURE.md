@@ -198,7 +198,11 @@ MCP is treated as a transport mechanism, not as a security boundary.
 
 ### 7.9 Evidence and Finding Pipeline
 
-Stores raw tool output and converts it into a common schema. The pipeline maintains the following states:
+Stores raw tool output unchanged, then creates checksummed/redacted evidence chunks. An AI normalization layer extracts rich structured facts, relationships, summaries, and semantic duplicate clusters; deterministic policy accepts only claims that cite verifiable chunks and satisfy type, scope, and checksum controls. This preserves high-detail evidence for model reasoning without treating a model inference as proof.
+
+The planner receives a bounded evidence pack of normalized facts and cited chunks rather than an aggressively reduced snapshot or unbounded raw artifacts. Raw evidence remains available for forensic review and later validation.
+
+The pipeline maintains the following states:
 
 `Observation → Candidate Finding → Validation Attempt → Confirmed Finding → Retest Result`
 

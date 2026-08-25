@@ -127,7 +127,7 @@ Example profile shape:
 }
 ```
 
-`audit_planning` is used for Flow 5. The same enabled default profile is used for the other AI stages in the POC when a dedicated profile is absent; production should configure dedicated `observation_normalization`, `finding_correlation`, `finding_validation`, and `report_generation` profiles. The model always returns structured proposals; deterministic validation still controls evidence references, scope, execution, and finding state.
+`audit_planning` is used for Flow 5. The same enabled default profile is used for the other AI stages in the POC when a dedicated profile is absent; production should configure dedicated `observation_normalization`, `finding_correlation`, `finding_validation`, and `report_generation` profiles. The model always returns structured proposals; deterministic validation still controls evidence references, scope, execution, finding state, and the audit-level validation decision.
 
 Before running the service, place a newly generated key in the process environment:
 
