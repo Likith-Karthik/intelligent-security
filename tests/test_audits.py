@@ -197,6 +197,41 @@ def test_create_audit_persists_request_and_emits_event(tmp_path) -> None:
     assert audit["state"] == "CREATED"
     assert audit["credential_references"] == ["vault://security/staging-test-account"]
 
+
+def test_offensive_boilerplate_is_persisted_and_fail_closed_without_execution(tmp_path) -> None:
+    app = create_app(str(tmp_path / "audits.db"))
+    client = TestClient(app)
+    created = client.post("/audits", json=valid_request()).json()
+
+    initial = client.get(f"/audits/{created['id']}/offensive/status")
+    assert initial.status_code == 200
+    assert initial.json()["state"] == "OFFENSIVE_DISABLED"
+    assert initial.json()["enabled"] is False
+    assert initial.json()["request_count"] == 0
+
+    requested = client.post(
+        f"/audits/{created['id']}/offensive/request",
+        json={"requested_by": "operator@example.test", "reason": "Future controlled capability evaluation."},
+    )
+    assert requested.status_code == 200
+    audit = requested.json()
+    assert audit["offensive_state"] == "OFFENSIVE_DISABLED"
+    assert audit["offensive_permission_grants"] == []
+    assert audit["offensive_plans"] == []
+    assert audit["offensive_requests"][0]["state"] == "OFFENSIVE_DISABLED"
+    assert audit["plugin_executions"] == []
+
+    status_response = client.get(f"/audits/{created['id']}/offensive/status")
+    assert status_response.json()["request_count"] == 1
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert events[-1]["event_type"] == "offensive.permission_requested"
+    assert "disabled" in events[-1]["payload"]["reason"].lower()
+
+    ui = client.get("/").text.lower()
+    assert "offensive actions: disabled" in ui
+    assert "offensive/run" not in ui
+    assert "offensive/approve" not in ui
+
     retrieved = client.get(f"/audits/{audit['id']}")
     assert retrieved.status_code == 200
     assert retrieved.json() == audit

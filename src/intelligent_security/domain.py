@@ -578,6 +578,57 @@ class ValidationDecisionType(str, Enum):
     OFFENSIVE_PERMISSION_REQUIRED = "OFFENSIVE_PERMISSION_REQUIRED"
 
 
+class OffensiveState(str, Enum):
+    OFFENSIVE_PERMISSION_REQUIRED = "OFFENSIVE_PERMISSION_REQUIRED"
+    OFFENSIVE_BLOCKED = "OFFENSIVE_BLOCKED"
+    OFFENSIVE_APPROVED = "OFFENSIVE_APPROVED"
+    OFFENSIVE_DISABLED = "OFFENSIVE_DISABLED"
+
+
+class OffensivePermissionGrant(BaseModel):
+    """Reserved schema only; no grant is actionable while policy is disabled."""
+
+    grant_id: UUID = Field(default_factory=uuid4)
+    audit_id: UUID
+    exact_assets: List[str] = Field(..., min_length=1, max_length=500)
+    allowed_operations: List[AuditOperation] = Field(..., min_length=1, max_length=50)
+    approved_by: str = Field(..., min_length=3, max_length=200)
+    issued_at: datetime
+    expires_at: datetime
+    revoked_at: Optional[datetime] = None
+    revoked_by: Optional[str] = Field(default=None, min_length=3, max_length=200)
+
+
+class OffensiveStep(BaseModel):
+    step_id: str = Field(..., min_length=1, max_length=100)
+    capability: str = Field(..., min_length=3, max_length=200)
+    contract_version: str = Field(..., min_length=1, max_length=50)
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
+class OffensivePlan(BaseModel):
+    plan_id: UUID = Field(default_factory=uuid4)
+    grant_id: UUID
+    state: OffensiveState = OffensiveState.OFFENSIVE_DISABLED
+    steps: List[OffensiveStep] = Field(..., min_length=1, max_length=100)
+    created_at: datetime
+
+
+class OffensiveRequest(BaseModel):
+    """A non-authorizing record of a future offensive permission request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested_by: str = Field(..., min_length=3, max_length=200)
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
+class OffensiveRequestRecord(OffensiveRequest):
+    request_id: UUID = Field(default_factory=uuid4)
+    requested_at: datetime
+    state: OffensiveState = OffensiveState.OFFENSIVE_DISABLED
+
+
 class ValidationDecision(BaseModel):
     """Immutable provenance for the audit-level conclusion of the VALIDATE stage."""
 
@@ -842,6 +893,10 @@ class Audit(BaseModel):
     validation_decision: Optional[ValidationDecision] = None
     replan_history: List[ReplanRecord] = Field(default_factory=list, max_length=100)
     report_snapshot: Optional[ReportSnapshot] = None
+    offensive_state: OffensiveState = OffensiveState.OFFENSIVE_DISABLED
+    offensive_requests: List[OffensiveRequestRecord] = Field(default_factory=list, max_length=100)
+    offensive_permission_grants: List[OffensivePermissionGrant] = Field(default_factory=list, max_length=100)
+    offensive_plans: List[OffensivePlan] = Field(default_factory=list, max_length=100)
     retest_plans: List[RetestPlan] = Field(default_factory=list)
     closed_at: Optional[datetime] = None
     closed_by: Optional[str] = None

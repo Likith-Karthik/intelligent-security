@@ -1399,6 +1399,8 @@ flowchart TD
 
 **Done when:** The future boundary is visible and auditable but has no executable path.
 
+**POC implementation:** `GET /audits/{audit_id}/offensive/status` always returns `OFFENSIVE_DISABLED`. `POST /audits/{audit_id}/offensive/request` persists a non-authorizing request record and an `offensive.permission_requested` event, but creates no grant, plan, scheduled step, adapter call, model call, or plugin execution. The execution resolver and ordinary plan policy reject `offensive` capabilities, and the operator UI exposes only a disabled status message.
+
 ### 23.13 S2 Flow 13 — Extend autonomous UI and run end-to-end tests
 
 **Goal:** Make the five compartments observable and resumable through one autonomous audit experience.

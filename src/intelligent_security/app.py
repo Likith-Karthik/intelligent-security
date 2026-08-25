@@ -23,6 +23,8 @@ from .domain import (
     ReplanStatus,
     ValidationDecision,
     ValidationDecisionType,
+    OffensiveRequest,
+    OffensiveRequestRecord,
     RetestCreateRequest,
     RetestApprovalRequest,
     AuditCloseRequest,
@@ -45,6 +47,7 @@ from .reporting.generator import ReportGenerationError, ReportGenerator
 from .policy.plan import PlanPolicyError, validate_plan
 from .policy.scope import ScopeValidationError, validate_scope
 from .pipeline.service import AuditPipelineService, PipelineTransitionError
+from .offensive.policy import disabled_status
 from .recon.service import ReconDiscoveryService
 from .recon.policy import default_recon_policy
 from .recon.planner import ReconPlanner, ReconPlanningError
@@ -559,6 +562,30 @@ def create_app(
             {"decision": decision.decision.value, "finding_ids": [str(item) for item in decision.finding_ids]},
         )
 
+    @app.get("/audits/{audit_id}/offensive/status")
+    def offensive_status(audit_id: UUID) -> dict:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        return disabled_status(audit)
+
+    @app.post("/audits/{audit_id}/offensive/request", response_model=Audit)
+    def request_offensive_permission(audit_id: UUID, request: OffensiveRequest) -> Audit:
+        """Record a request while intentionally providing no authorization or run path."""
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        record = OffensiveRequestRecord(
+            requested_by=request.requested_by, reason=request.reason, requested_at=datetime.now(timezone.utc),
+        )
+        audit.offensive_state = record.state
+        audit.offensive_requests.append(record)
+        return app.state.audit_repository.save_with_event(
+            audit, "offensive.permission_requested",
+            {"request_id": str(record.request_id), "requested_by": record.requested_by, "state": record.state.value,
+             "reason": "Offensive execution remains disabled by policy."},
+        )
+
     @app.post("/audits/{audit_id}/replan", response_model=Audit)
     def replan_audit(audit_id: UUID) -> Audit:
         """Turn one evidence-gap decision into a single, policy-checked incremental schedule."""
@@ -891,7 +918,9 @@ def create_app(
             eligible_plugin_ids = app.state.execution_service.executable_plugin_ids(
                 audit, app.state.capability_registry
             )
-            discovery = app.state.capability_registry.discover(audit, eligible_plugin_ids)
+            discovery = app.state.capability_registry.discover(
+                audit, eligible_plugin_ids, stages={CapabilityStage.EXECUTE, CapabilityStage.VALIDATE}
+            )
         except (RegistryError, ExecutionError) as error:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

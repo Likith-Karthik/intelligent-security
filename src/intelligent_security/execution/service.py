@@ -206,6 +206,8 @@ class ExecutionService:
         for candidate in candidates:
             if candidate.capability != step.capability or candidate.contract_version != step.contract_version:
                 continue
+            if candidate.stage == CapabilityStage.OFFENSIVE:
+                continue
             runtime = profiles.get(candidate.plugin_id)
             if runtime is None or not runtime.enabled or runtime.adapter.value not in {"native", "container_cli", "rest", "restricted_mcp", "llm_testing"}:
                 continue

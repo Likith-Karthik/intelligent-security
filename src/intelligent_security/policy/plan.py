@@ -4,6 +4,7 @@ from typing import Dict, List
 from intelligent_security.domain import (
     Audit,
     AuditOperation,
+    CapabilityStage,
     PlanValidation,
     PlanValidationStatus,
     PluginHealth,
@@ -46,6 +47,8 @@ def validate_plan(audit: Audit) -> PlanValidation:
         if not matches:
             raise PlanPolicyError("capability_not_discovered", "Step {} references an undiscovered capability.".format(step.id))
         candidate = matches[0]
+        if candidate.stage == CapabilityStage.OFFENSIVE:
+            raise PlanPolicyError("offensive_capability_disabled", "Offensive capabilities cannot be included in an audit plan.")
         if candidate.health != PluginHealth.DECLARED_HEALTHY:
             raise PlanPolicyError("plugin_unhealthy", "Step {} requires an unhealthy plugin.".format(step.id))
         if candidate.required_operation not in audit.scope_policy.allowed_operations:

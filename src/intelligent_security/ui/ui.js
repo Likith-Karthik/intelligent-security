@@ -207,6 +207,9 @@ function render() {
   const autoStatusEl = $("#automation-status");
   if (autoStatusEl) autoStatusEl.textContent = statusText;
 
+  const offensiveStatusEl = $("#offensive-status");
+  if (offensiveStatusEl) offensiveStatusEl.textContent = "Offensive actions: disabled in this POC.";
+
   const pauseBtn = $("#pause");
   const exitBtn = $("#exit");
   const restartBtn = $("#restart");
