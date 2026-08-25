@@ -398,6 +398,18 @@ class ExecutionSchedule(BaseModel):
     scheduled_at: datetime
 
 
+class ReconExecutionSchedule(BaseModel):
+    """Bounded schedule for a persisted recon plan, before plugin resolution."""
+
+    schedule_version: str = Field(default="recon-schedule/v1", min_length=1, max_length=100)
+    registry_snapshot_id: str = Field(..., min_length=1, max_length=200)
+    policy_version: str = Field(..., min_length=1, max_length=100)
+    steps: List[ScheduledStep] = Field(..., min_length=1, max_length=100)
+    reserved_duration_seconds: int = Field(..., ge=0)
+    reserved_cost_usd: float = Field(..., ge=0)
+    scheduled_at: datetime
+
+
 class PluginExecutionStatus(str, Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
@@ -689,6 +701,8 @@ class Audit(BaseModel):
     recon_capabilities_discovered_at: Optional[datetime] = None
     recon_plan: Optional[ReconPlan] = None
     recon_plan_created_at: Optional[datetime] = None
+    recon_execution_schedule: Optional[ReconExecutionSchedule] = None
+    recon_plan_scheduled_at: Optional[datetime] = None
     capability_discovery: Optional[CapabilityDiscovery] = None
     capabilities_discovered_at: Optional[datetime] = None
     planner_model_profile: Optional[str] = None

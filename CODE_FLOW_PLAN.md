@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Stage 1 implemented — Stage 2 Flows 1–4 implemented |
+| Status | Stage 1 implemented — Stage 2 Flows 1–5 implemented |
 | Scope | POC implementation flow |
 | Parent document | POC Architecture |
 | Last updated | 25 August 2026 |
@@ -1169,6 +1169,8 @@ flowchart TD
 - Verify timeout, cancellation, non-zero exit, and unavailable-runtime behavior.
 
 **Done when:** A recon run produces checksummed raw evidence through the same trusted execution path as Stage 1.
+
+**POC implementation:** `POST /audits/{audit_id}/recon/schedule` turns the deterministic capability plan into a bounded `ReconExecutionSchedule` without selecting a plugin. `POST /audits/{audit_id}/recon/steps/{step_id}/execute` revalidates scope, checks its persisted snapshot against the current recon catalog, late-resolves a currently eligible runtime, and invokes the shared adapter/evidence boundary. It records `recon.scheduled`, `recon.step_completed`, or `recon.step_failed`; a stale registry snapshot fails closed before any adapter invocation.
 
 ### 23.6 S2 Flow 6 — Normalize recon and create the ReconSnapshot
 

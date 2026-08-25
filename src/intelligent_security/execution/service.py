@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from intelligent_security.domain import (
     Audit,
     CapabilityCandidate,
+    CapabilityStage,
     PluginExecution,
     PluginExecutionStatus,
     ScheduledStep,
@@ -54,6 +55,47 @@ class ExecutionService:
             raise ExecutionError("runtime_configuration_error", str(error))
 
         candidate, runtime, package = self._resolve(audit, step, current_discovery.candidates, profiles, registry)
+        return self._run_resolved(audit, step, current_discovery, candidate, runtime, package, started_at)
+
+    def execute_recon(
+        self,
+        audit: Audit,
+        step: ScheduledStep,
+        registry: CapabilityRegistry,
+        expected_snapshot_id: str,
+    ) -> PluginExecution:
+        """Execute one recon step after rechecking its current safe execution boundary."""
+        if step.status != ScheduledStepStatus.READY:
+            raise ExecutionError("step_not_ready", "Recon step {} is not ready for execution.".format(step.plan_step_id))
+        started_at = datetime.now(timezone.utc)
+        try:
+            eligible_plugin_ids = self.executable_plugin_ids(audit, registry)
+            current_discovery = registry.discover(
+                audit,
+                eligible_plugin_ids=eligible_plugin_ids,
+                stages={CapabilityStage.RECON},
+            )
+            profiles = self.runtime_profiles.load()
+        except (RegistryError, RuntimeProfileError) as error:
+            raise ExecutionError("runtime_configuration_error", str(error))
+        if current_discovery.registry_snapshot_id != expected_snapshot_id:
+            raise ExecutionError(
+                "registry_snapshot_mismatch",
+                "Recon execution catalog changed after planning; rediscover and replan recon.",
+            )
+        candidate, runtime, package = self._resolve(audit, step, current_discovery.candidates, profiles, registry)
+        return self._run_resolved(audit, step, current_discovery, candidate, runtime, package, started_at)
+
+    def _run_resolved(
+        self,
+        audit: Audit,
+        step: ScheduledStep,
+        current_discovery,
+        candidate: CapabilityCandidate,
+        runtime: PluginRuntimeProfile,
+        package: PluginPackage,
+        started_at: datetime,
+    ) -> PluginExecution:
         adapter = self.adapters.get(runtime.adapter.value)
         if adapter is None:
             raise ExecutionError(

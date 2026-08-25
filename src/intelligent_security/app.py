@@ -43,6 +43,11 @@ from .pipeline.service import AuditPipelineService, PipelineTransitionError
 from .recon.service import ReconDiscoveryService
 from .recon.policy import default_recon_policy
 from .recon.planner import ReconPlanner, ReconPlanningError
+from .recon.scheduling import (
+    ReconScheduleError,
+    release_dependent_recon_steps,
+    schedule_recon_plan,
+)
 from .planning.model_gateway import ModelGatewayError, OpenAICompatibleModelGateway
 from .planning.model_profiles import ModelProfileError, ModelProfileRegistry
 from .planning.service import AuditPlanner, PlanningError
@@ -798,6 +803,92 @@ def create_app(
                 "registry_snapshot_id": plan.registry_snapshot_id,
                 "step_count": len(plan.steps),
                 "coverage_gap_count": len(plan.coverage_gaps),
+            },
+        )
+
+    @app.post("/audits/{audit_id}/recon/schedule", response_model=Audit)
+    def schedule_recon(audit_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.recon_execution_schedule is not None:
+            return audit
+        pipeline = app.state.audit_pipeline_service.effective_pipeline(audit)
+        recon_progress = next(item for item in pipeline.stages if item.stage == PipelineStage.RECON)
+        if pipeline.current_stage != PipelineStage.RECON or recon_progress.status not in {
+            StageStatus.READY,
+            StageStatus.RUNNING,
+        }:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Recon can only be scheduled during RECON")
+        try:
+            schedule = schedule_recon_plan(audit)
+        except ReconScheduleError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": error.code, "message": error.message},
+            )
+        audit.recon_execution_schedule = schedule
+        audit.recon_plan_scheduled_at = schedule.scheduled_at
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "recon.scheduled",
+            {
+                "schedule_version": schedule.schedule_version,
+                "registry_snapshot_id": schedule.registry_snapshot_id,
+                "step_count": len(schedule.steps),
+                "reserved_duration_seconds": schedule.reserved_duration_seconds,
+                "reserved_cost_usd": schedule.reserved_cost_usd,
+            },
+        )
+
+    @app.post("/audits/{audit_id}/recon/steps/{step_id}/execute", response_model=Audit)
+    def execute_recon_step(audit_id: UUID, step_id: str) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        schedule = audit.recon_execution_schedule
+        if schedule is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Recon must be scheduled before execution")
+        step = next((item for item in schedule.steps if item.plan_step_id == step_id), None)
+        if step is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recon step not found")
+        if step.status != ScheduledStepStatus.READY:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Recon step is not ready")
+        try:
+            validated_scope = validate_scope(audit)
+        except ScopeValidationError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": error.code, "message": error.message},
+            )
+        if audit.scope_policy is None or validated_scope.model_dump(mode="json") != audit.scope_policy.model_dump(mode="json"):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Recon scope changed; validate scope and rediscover recon capabilities")
+        try:
+            execution = app.state.execution_service.execute_recon(
+                audit,
+                step,
+                app.state.capability_registry,
+                schedule.registry_snapshot_id,
+            )
+        except ExecutionError as error:
+            step.status = ScheduledStepStatus.FAILED
+            return app.state.audit_repository.save_with_event(
+                audit,
+                "recon.step_failed",
+                {"step_id": step_id, "code": error.code, "message": error.message},
+            )
+
+        audit.plugin_executions.append(execution)
+        release_dependent_recon_steps(schedule)
+        return app.state.audit_repository.save_with_event(
+            audit,
+            "recon.step_completed" if execution.status == PluginExecutionStatus.SUCCEEDED else "recon.step_failed",
+            {
+                "step_id": step_id,
+                "execution_id": str(execution.execution_id),
+                "evidence_id": str(execution.evidence_record_id) if execution.evidence_record_id else None,
+                "status": execution.status.value,
+                "error_code": execution.error_code,
             },
         )
 

@@ -8,6 +8,7 @@ from intelligent_security.app import create_app
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfileRegistry
 from intelligent_security.execution.service import ExecutionService
 from intelligent_security.execution.adapters import ContainerCliAdapter
+from intelligent_security.execution.result import AdapterExecutionResult
 from intelligent_security.evidence.artifact_store import ArtifactStore
 from intelligent_security.evidence.collector import EvidenceCollector
 from intelligent_security.evidence.normalizer import EvidenceNormalizer
@@ -461,6 +462,103 @@ def test_recon_planner_rejects_offensive_catalog_entries(tmp_path) -> None:
         ReconPlanner().create(audit, ReconPolicy())
 
     assert error.value.code == "unsafe_recon_capability"
+
+
+def test_recon_schedule_executes_through_adapter_and_captures_raw_evidence(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    runtimes = tmp_path / "runtimes.json"
+    runtimes.write_text(
+        json.dumps({"plugins": [{
+            "plugin_id": "test-recon", "adapter": "container_cli",
+            "runtime_reference": "container-config://test-recon",
+            "image_reference": "test-recon@sha256:" + "a" * 64,
+            "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+        }]}), encoding="utf-8"
+    )
+    app = create_app(
+        str(tmp_path / "audits.db"), plugin_manifest_directory=str(manifests),
+        plugin_runtime_profiles_path=str(runtimes), evidence_directory=str(tmp_path / "evidence"),
+    )
+
+    class RecordingReconAdapter:
+        calls = []
+
+        def execute(self, runtime, audit, step, package):
+            self.calls.append((runtime.plugin_id, step.plan_step_id, package.manifest.plugin_id))
+            return AdapterExecutionResult(
+                invocation=["test-recon", "scan", "staging.example.test"],
+                stdout='{"host":"staging.example.test","port":443}\n',
+                output_summary={"record_count": 1},
+                exit_code=0,
+            )
+
+    adapter = RecordingReconAdapter()
+    app.state.execution_service.adapters["container_cli"] = adapter
+    client = TestClient(app)
+    created = prepare_recon_audit(client, recon_request())
+    assert client.post(f"/audits/{created['id']}/recon/capabilities/discover").status_code == 200
+    assert client.post(f"/audits/{created['id']}/recon/plan").status_code == 200
+
+    scheduled = client.post(f"/audits/{created['id']}/recon/schedule")
+    executed = client.post(f"/audits/{created['id']}/recon/steps/recon-01/execute")
+
+    assert scheduled.status_code == 200
+    assert scheduled.json()["recon_execution_schedule"]["steps"][0]["status"] == "READY"
+    assert executed.status_code == 200
+    audit = executed.json()
+    assert adapter.calls == [("test-recon", "recon-01", "test-recon")]
+    assert audit["recon_execution_schedule"]["steps"][0]["status"] == "SUCCEEDED"
+    assert audit["plugin_executions"][-1]["status"] == "SUCCEEDED"
+    evidence = audit["raw_evidence"][-1]
+    assert evidence["plan_step_id"] == "recon-01"
+    assert evidence["container_image_digest"] == "test-recon@sha256:" + "a" * 64
+    assert {artifact["kind"] for artifact in evidence["artifacts"]} >= {"invocation", "stdout", "stderr"}
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert [event["event_type"] for event in events][-2:] == ["recon.scheduled", "recon.step_completed"]
+
+
+def test_recon_execution_fails_closed_when_registry_snapshot_changes(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    runtimes = tmp_path / "runtimes.json"
+    runtimes.write_text(
+        json.dumps({"plugins": [{
+            "plugin_id": "test-recon", "adapter": "container_cli",
+            "runtime_reference": "container-config://test-recon",
+            "allowed_target_hosts": ["staging.example.test"], "enabled": True,
+        }]}), encoding="utf-8"
+    )
+    app = create_app(
+        str(tmp_path / "audits.db"), plugin_manifest_directory=str(manifests),
+        plugin_runtime_profiles_path=str(runtimes),
+    )
+
+    class ExplodingAdapter:
+        def execute(self, *args, **kwargs):
+            raise AssertionError("A stale recon schedule must not invoke a plugin")
+
+    app.state.execution_service.adapters["container_cli"] = ExplodingAdapter()
+    client = TestClient(app)
+    created = prepare_recon_audit(client, recon_request())
+    assert client.post(f"/audits/{created['id']}/recon/capabilities/discover").status_code == 200
+    assert client.post(f"/audits/{created['id']}/recon/plan").status_code == 200
+    assert client.post(f"/audits/{created['id']}/recon/schedule").status_code == 200
+    manifest_path = manifests / "test-recon" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["plugin_version"] = "2"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    app.state.capability_registry.refresh()
+
+    response = client.post(f"/audits/{created['id']}/recon/steps/recon-01/execute")
+
+    assert response.status_code == 200
+    audit = response.json()
+    assert audit["recon_execution_schedule"]["steps"][0]["status"] == "FAILED"
+    assert audit["plugin_executions"] == []
+    event = client.get(f"/audits/{created['id']}/events").json()[-1]
+    assert event["event_type"] == "recon.step_failed"
+    assert event["payload"]["code"] == "registry_snapshot_mismatch"
 
 
 def test_create_audit_rejects_invalid_scope() -> None:
