@@ -70,6 +70,18 @@ class AuditPlanner:
                 "cost_budget_usd": audit.cost_budget_usd,
             },
             "registry_snapshot_id": audit.capability_discovery.registry_snapshot_id,
+            "recon_snapshot": (
+                {
+                    "snapshot_id": audit.recon_snapshot.snapshot_id,
+                    "assets": audit.recon_snapshot.assets,
+                    "services": audit.recon_snapshot.services,
+                    "technologies": audit.recon_snapshot.technologies,
+                    "endpoints": audit.recon_snapshot.endpoints,
+                    "interfaces": audit.recon_snapshot.interfaces,
+                    "coverage_gaps": [gap.model_dump(mode="json") for gap in audit.recon_snapshot.coverage_gaps],
+                }
+                if audit.recon_snapshot is not None else None
+            ),
             "available_capabilities": [
                 {
                     "capability": candidate.capability,
@@ -115,6 +127,7 @@ class AuditPlanner:
             registry_snapshot_id=(
                 audit.capability_discovery.registry_snapshot_id if audit.capability_discovery else "legacy"
             ),
+            recon_snapshot_id=audit.recon_snapshot.snapshot_id if audit.recon_snapshot else None,
             steps=steps,
             generated_at=datetime.now(timezone.utc),
         )

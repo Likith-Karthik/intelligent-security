@@ -342,6 +342,7 @@ class AuditPlan(BaseModel):
     plan_version: str
     model_profile_id: str
     registry_snapshot_id: str = "legacy"
+    recon_snapshot_id: Optional[str] = None
     steps: List[PlanStep] = Field(..., min_length=1, max_length=100)
     generated_at: datetime
 
@@ -408,6 +409,38 @@ class ReconExecutionSchedule(BaseModel):
     reserved_duration_seconds: int = Field(..., ge=0)
     reserved_cost_usd: float = Field(..., ge=0)
     scheduled_at: datetime
+
+
+class ReconScopeStatus(str, Enum):
+    IN_SCOPE = "IN_SCOPE"
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
+
+
+class ReconObservation(BaseModel):
+    observation_id: UUID = Field(default_factory=uuid4)
+    observation_type: str = Field(..., pattern=r"^(asset|service|technology|endpoint|interface)$")
+    value: str = Field(..., min_length=1, max_length=2048)
+    parent_asset: Optional[str] = Field(default=None, max_length=2048)
+    source_evidence_id: UUID
+    confidence: float = Field(..., ge=0, le=1)
+    first_observed_at: datetime
+    last_observed_at: datetime
+    scope_status: ReconScopeStatus
+
+
+class ReconSnapshot(BaseModel):
+    snapshot_id: str = Field(..., pattern=r"^recon-[a-f0-9]{16}$")
+    audit_id: UUID
+    registry_snapshot_id: str = Field(..., min_length=1, max_length=200)
+    assets: List[str] = Field(default_factory=list, max_length=1000)
+    services: List[str] = Field(default_factory=list, max_length=1000)
+    technologies: List[str] = Field(default_factory=list, max_length=1000)
+    endpoints: List[str] = Field(default_factory=list, max_length=1000)
+    interfaces: List[str] = Field(default_factory=list, max_length=1000)
+    coverage_gaps: List[ReconPlanGap] = Field(default_factory=list, max_length=100)
+    evidence_ids: List[UUID] = Field(default_factory=list, max_length=1000)
+    digest: str = Field(..., pattern=r"^[a-f0-9]{64}$")
+    created_at: datetime
 
 
 class PluginExecutionStatus(str, Enum):
@@ -703,6 +736,8 @@ class Audit(BaseModel):
     recon_plan_created_at: Optional[datetime] = None
     recon_execution_schedule: Optional[ReconExecutionSchedule] = None
     recon_plan_scheduled_at: Optional[datetime] = None
+    recon_observations: List[ReconObservation] = Field(default_factory=list)
+    recon_snapshot: Optional[ReconSnapshot] = None
     capability_discovery: Optional[CapabilityDiscovery] = None
     capabilities_discovered_at: Optional[datetime] = None
     planner_model_profile: Optional[str] = None

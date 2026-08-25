@@ -12,6 +12,7 @@ from .domain import (
     AuditEvent,
     AuditState,
     AuditPipeline,
+    CapabilityStage,
     PipelineStage,
     PipelineTransitionRequest,
     StageStatus,
@@ -48,6 +49,8 @@ from .recon.scheduling import (
     release_dependent_recon_steps,
     schedule_recon_plan,
 )
+from .recon.normalizer import ReconNormalizer, ReconNormalizationError
+from .recon.snapshot import ReconSnapshotError, create_recon_snapshot
 from .planning.model_gateway import ModelGatewayError, OpenAICompatibleModelGateway
 from .planning.model_profiles import ModelProfileError, ModelProfileRegistry
 from .planning.service import AuditPlanner, PlanningError
@@ -88,6 +91,7 @@ def create_app(
     app.state.recon_discovery_service = ReconDiscoveryService()
     app.state.recon_policy = default_recon_policy()
     app.state.recon_planner = ReconPlanner()
+    app.state.recon_normalizer = ReconNormalizer()
 
     @app.get("/", include_in_schema=False)
     def audit_console() -> FileResponse:
@@ -892,6 +896,38 @@ def create_app(
             },
         )
 
+    @app.post("/audits/{audit_id}/recon/evidence/{evidence_id}/normalize", response_model=Audit)
+    def normalize_recon_evidence(audit_id: UUID, evidence_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        try:
+            observations = app.state.recon_normalizer.normalize(audit, evidence_id, app.state.evidence_store)
+        except ReconNormalizationError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": error.code, "message": error.message})
+        existing = {(item.observation_type, item.value, item.parent_asset, item.source_evidence_id) for item in audit.recon_observations}
+        accepted = [item for item in observations if (item.observation_type, item.value, item.parent_asset, item.source_evidence_id) not in existing]
+        audit.recon_observations.extend(accepted)
+        return app.state.audit_repository.save_with_event(
+            audit, "recon.observation_accepted", {"evidence_id": str(evidence_id), "accepted_count": len(accepted)}
+        )
+
+    @app.post("/audits/{audit_id}/recon/finalize", response_model=Audit)
+    def finalize_recon(audit_id: UUID) -> Audit:
+        audit = app.state.audit_repository.get(audit_id)
+        if audit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+        if audit.recon_snapshot is not None:
+            return audit
+        try:
+            snapshot = create_recon_snapshot(audit)
+        except ReconSnapshotError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": error.code, "message": error.message})
+        audit.recon_snapshot = snapshot
+        return app.state.audit_repository.save_with_event(
+            audit, "recon.snapshot_created", {"snapshot_id": snapshot.snapshot_id, "digest": snapshot.digest, "evidence_count": len(snapshot.evidence_ids)}
+        )
+
     @app.post("/audits/{audit_id}/plan/generate", response_model=Audit)
     def generate_audit_plan(audit_id: UUID) -> Audit:
         audit = app.state.audit_repository.get(audit_id)
@@ -909,16 +945,30 @@ def create_app(
                 "plan.regeneration_requested",
                 {"previous_state": "PLAN_REJECTED"},
             )
-        elif audit.state != AuditState.CAPABILITIES_DISCOVERED:
+        elif audit.state != AuditState.CAPABILITIES_DISCOVERED and not (
+            audit.state == AuditState.TARGET_PROFILED and audit.recon_snapshot is not None
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Audit plan cannot be generated before capability discovery",
             )
         try:
+            if audit.recon_snapshot is not None:
+                eligible_plugin_ids = app.state.execution_service.executable_plugin_ids(audit, app.state.capability_registry)
+                audit.capability_discovery = app.state.capability_registry.discover(
+                    audit, eligible_plugin_ids=eligible_plugin_ids,
+                    stages={CapabilityStage.EXECUTE, CapabilityStage.VALIDATE},
+                )
+                audit.capabilities_discovered_at = audit.capability_discovery.discovered_at
             profile = app.state.model_profile_registry.select_planner_profile(
                 audit.planner_model_profile
             )
             audit_plan = app.state.audit_planner.generate(audit, profile)
+        except (RegistryError, ExecutionError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "main_capability_discovery_failed", "message": str(error)},
+            )
         except ModelProfileError as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

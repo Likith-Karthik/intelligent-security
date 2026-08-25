@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Stage 1 implemented — Stage 2 Flows 1–5 implemented |
+| Status | Stage 1 implemented — Stage 2 Flows 1–7 implemented |
 | Scope | POC implementation flow |
 | Parent document | POC Architecture |
 | Last updated | 25 August 2026 |
@@ -1213,6 +1213,8 @@ flowchart TD
 
 **Done when:** Planning can use the `ReconSnapshot` without parsing native plugin output.
 
+**POC implementation:** Recon JSONL evidence is deterministically normalized into canonical assets, services, technologies, endpoints, and interfaces with evidence provenance and scope status. `POST /audits/{audit_id}/recon/finalize` freezes an evidence-digested `ReconSnapshot`; only in-scope facts are included in its executable planner context.
+
 ### 23.7 S2 Flow 7 — Generate and approve the main AI audit plan
 
 **Goal:** Plan security testing from accepted recon evidence and the executable audit catalog.
@@ -1244,6 +1246,8 @@ flowchart TD
 - Verify a changed `ReconSnapshot` invalidates an unapproved stale plan.
 
 **Done when:** The approved plan is evidence-informed, capability-based, and contains no plugin-specific invocation data.
+
+**POC implementation:** When a finalized ReconSnapshot exists, `POST /audits/{audit_id}/plan/generate` refreshes the catalog using only runtime-eligible `execute` and `validate` capabilities. The planner receives the compact snapshot summary, never raw artifacts or runtime/plugin invocation data. Proposed plans retain the recon snapshot ID, and deterministic validation rejects a plan if that snapshot has changed.
 
 ### 23.8 S2 Flow 8 — Execute the main audit plan
 

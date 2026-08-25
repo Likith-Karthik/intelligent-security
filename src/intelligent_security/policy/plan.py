@@ -28,6 +28,10 @@ def validate_plan(audit: Audit) -> PlanValidation:
             "registry_snapshot_mismatch",
             "The proposed plan does not match the capability registry snapshot used for discovery.",
         )
+    if audit.audit_plan.recon_snapshot_id and (
+        audit.recon_snapshot is None or audit.audit_plan.recon_snapshot_id != audit.recon_snapshot.snapshot_id
+    ):
+        raise PlanPolicyError("recon_snapshot_mismatch", "The proposed plan does not match the finalized recon snapshot.")
 
     candidates: Dict[str, List] = {}
     for candidate in audit.capability_discovery.candidates:

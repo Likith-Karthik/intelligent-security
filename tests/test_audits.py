@@ -115,6 +115,24 @@ def write_recon_package(manifest_directory, plugin_id="test-recon") -> None:
     )
 
 
+def write_main_audit_package(manifest_directory, plugin_id="test-main") -> None:
+    package_directory = manifest_directory / plugin_id
+    package_directory.mkdir(parents=True)
+    (package_directory / "manifest.json").write_text(json.dumps({
+        "plugin_id": plugin_id, "plugin_version": "1", "adapter": "container_cli",
+        "enabled": True, "health": "declared_healthy", "capabilities": [{
+            "capability": "web.header_review", "contract_version": "1", "stage": "execute",
+            "description": "Review approved HTTP response headers.", "target_types": ["web_application"],
+            "required_operation": "web_scan", "required_inputs": ["target_profile", "scope_policy"],
+            "estimated_duration_seconds": 60, "estimated_cost_usd": 0, "reliability": 0.9,
+        }],
+    }), encoding="utf-8")
+    (package_directory / "execution.json").write_text(json.dumps({
+        "adapter": "container_cli", "target_input": "url", "arguments": ["review", "{{target.url}}"],
+        "output_format": "jsonl",
+    }), encoding="utf-8")
+
+
 def prepare_recon_audit(client, request=None) -> dict:
     created = client.post("/audits", json=request or valid_request()).json()
     assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
@@ -559,6 +577,60 @@ def test_recon_execution_fails_closed_when_registry_snapshot_changes(tmp_path) -
     event = client.get(f"/audits/{created['id']}/events").json()[-1]
     assert event["event_type"] == "recon.step_failed"
     assert event["payload"]["code"] == "registry_snapshot_mismatch"
+
+
+def test_main_plan_uses_finalized_recon_snapshot_and_executable_plugin_catalog(tmp_path) -> None:
+    manifests = tmp_path / "manifests"
+    write_recon_package(manifests)
+    write_main_audit_package(manifests)
+    runtimes = tmp_path / "runtimes.json"
+    runtimes.write_text(json.dumps({"plugins": [
+        {"plugin_id": "test-recon", "adapter": "container_cli", "runtime_reference": "container-config://recon", "allowed_target_hosts": ["staging.example.test"], "enabled": True},
+        {"plugin_id": "test-main", "adapter": "container_cli", "runtime_reference": "container-config://main", "allowed_target_hosts": ["staging.example.test"], "enabled": True},
+    ]}), encoding="utf-8")
+    app = create_app(str(tmp_path / "audits.db"), plugin_manifest_directory=str(manifests), plugin_runtime_profiles_path=str(runtimes), evidence_directory=str(tmp_path / "evidence"))
+
+    class PluginAdapter:
+        def execute(self, runtime, audit, step, package):
+            return AdapterExecutionResult(
+                invocation=["test", step.capability], exit_code=0,
+                stdout='{"host":"staging.example.test","url":"https://staging.example.test/","scheme":"https","port":"443","response":"HTTP/1.1 200 OK\\r\\nServer: Caddy\\r\\n"}\n',
+            )
+
+    class ModelGateway:
+        def __init__(self): self.prompt = ""
+        def generate_json(self, profile, system_prompt, user_prompt):
+            self.prompt = user_prompt
+            return {"steps": [{"id": "headers", "capability": "web.header_review", "depends_on": [], "inputs": {}, "reason": "Review the reachable recon interface."}]}
+
+    gateway = ModelGateway()
+    app.state.execution_service.adapters["container_cli"] = PluginAdapter()
+    app.state.audit_planner = AuditPlanner(gateway)
+    client = TestClient(app)
+    request = valid_request()
+    request["authorization"]["allowed_operations"] = ["port_discovery", "web_scan"]
+    created = prepare_recon_audit(client, request)
+    assert client.post(f"/audits/{created['id']}/recon/capabilities/discover").status_code == 200
+    assert client.post(f"/audits/{created['id']}/recon/plan").status_code == 200
+    assert client.post(f"/audits/{created['id']}/recon/schedule").status_code == 200
+    executed = client.post(f"/audits/{created['id']}/recon/steps/recon-01/execute").json()
+    evidence_id = executed["raw_evidence"][-1]["evidence_id"]
+    assert client.post(f"/audits/{created['id']}/recon/evidence/{evidence_id}/normalize").status_code == 200
+    finalized = client.post(f"/audits/{created['id']}/recon/finalize")
+
+    generated = client.post(f"/audits/{created['id']}/plan/generate")
+    validated = client.post(f"/audits/{created['id']}/plan/validate")
+
+    assert finalized.status_code == 200
+    assert generated.status_code == 200
+    assert validated.status_code == 200
+    audit = validated.json()
+    assert audit["recon_snapshot"]["assets"] == ["staging.example.test"]
+    assert audit["audit_plan"]["recon_snapshot_id"] == audit["recon_snapshot"]["snapshot_id"]
+    assert [candidate["capability"] for candidate in audit["capability_discovery"]["candidates"]] == ["web.header_review"]
+    assert "staging.example.test" in gateway.prompt
+    assert "stdout" not in gateway.prompt
+    assert audit["plan_validation"]["status"] == "APPROVED"
 
 
 def test_create_audit_rejects_invalid_scope() -> None:
