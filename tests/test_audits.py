@@ -187,6 +187,17 @@ def recon_candidate(capability, rank=1, duration=60, cost=0, operation=AuditOper
     )
 
 
+def test_legacy_capability_candidates_receive_conservative_stage_defaults() -> None:
+    executable = recon_candidate("web.vulnerability_scan").model_dump()
+    executable.pop("stage")
+    executable["validation_for"] = []
+    validation = dict(executable)
+    validation["validation_for"] = ["web.vulnerability_scan"]
+
+    assert CapabilityCandidate.model_validate(executable).stage == CapabilityStage.EXECUTE
+    assert CapabilityCandidate.model_validate(validation).stage == CapabilityStage.VALIDATE
+
+
 def test_create_audit_persists_request_and_emits_event(tmp_path) -> None:
     client = TestClient(create_app(str(tmp_path / "audits.db")))
 

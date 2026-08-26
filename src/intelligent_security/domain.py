@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 CredentialReference = Annotated[
@@ -216,6 +216,24 @@ class CapabilityCandidate(BaseModel):
     reliability: float
     health: PluginHealth
     validation_for: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def assign_legacy_stage(cls, value):
+        """Load candidates persisted before pipeline stages were introduced.
+
+        A legacy candidate with a validation relationship is constrained to
+        VALIDATE; every other unknown legacy candidate is constrained to
+        EXECUTE.  This never broadens a candidate into RECON or OFFENSIVE.
+        """
+        if isinstance(value, dict) and not value.get("stage"):
+            value = dict(value)
+            value["stage"] = (
+                CapabilityStage.VALIDATE
+                if value.get("validation_for")
+                else CapabilityStage.EXECUTE
+            )
+        return value
 
 
 class CapabilityGap(BaseModel):
