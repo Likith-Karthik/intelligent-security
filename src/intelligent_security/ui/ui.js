@@ -11,24 +11,7 @@ let automationMode = localStorage.getItem("security-audit-automation") || "runni
 let inFlight = false;
 let driveTimer = null;
 
-const routes = {
-  CREATED: ["Validate scope", "/scope/validate"],
-  SCOPE_VALIDATED: ["Profile target", "/profile"],
-  TARGET_PROFILED: ["Discover capabilities", "/capabilities/discover"],
-  CAPABILITIES_DISCOVERED: ["Generate AI plan", "/plan/generate"],
-  PLAN_PROPOSED: ["Validate AI plan", "/plan/validate"],
-  PLAN_APPROVED: ["Schedule plan", "/plan/schedule"],
-};
-
-const STAGES = [
-  "CREATED",
-  "SCOPE_VALIDATED",
-  "TARGET_PROFILED",
-  "CAPABILITIES_DISCOVERED",
-  "PLAN_PROPOSED",
-  "PLAN_APPROVED",
-  "PLAN_SCHEDULED"
-];
+const STAGES = ["PREFLIGHT", "RECON", "PLAN", "EXECUTE", "VALIDATE", "REPORT", "CLOSED"];
 
 // --- Theme Management ---
 function initTheme() {
@@ -131,8 +114,8 @@ function getStatusBadge(status) {
 }
 
 // --- Stepper Updater ---
-function updateStepper(currentState) {
-  const currentIndex = STAGES.indexOf(currentState);
+function updateStepper(currentStage) {
+  const currentIndex = STAGES.indexOf(currentStage);
   $$(".pipeline-step").forEach((el) => {
     const stage = el.getAttribute("data-stage");
     const stageIndex = STAGES.indexOf(stage);
@@ -143,6 +126,58 @@ function updateStepper(currentState) {
       el.classList.add("active");
     }
   });
+}
+
+function stageProgress(stage) {
+  return audit?.pipeline?.stages?.find((item) => item.stage === stage);
+}
+
+function pipelineStage() {
+  return audit?.pipeline?.current_stage || "PREFLIGHT";
+}
+
+function nextAction() {
+  if (!audit) return null;
+  const stage = pipelineStage();
+  const status = stageProgress(stage)?.status;
+  const post = (label, path, body) => ({ label, path, body });
+  if (stage === "PREFLIGHT") {
+    if (audit.state === "CREATED") return post("Validate target scope", "/scope/validate");
+    if (audit.state === "SCOPE_VALIDATED") return post("Profile target", "/profile");
+    if (audit.state === "TARGET_PROFILED" && status === "PENDING") return post("Start preparation", "/pipeline/transition", { stage: "PREFLIGHT", status: "RUNNING" });
+    if (audit.state === "TARGET_PROFILED" && status === "RUNNING") return post("Complete preparation", "/pipeline/transition", { stage: "PREFLIGHT", status: "SUCCEEDED" });
+    if (audit.state === "TARGET_PROFILED" && status === "SUCCEEDED") return post("Enter recon", "/pipeline/transition", { stage: "RECON", status: "READY" });
+  }
+  if (stage === "RECON") {
+    if (!audit.recon_capability_discovery) return post("Discover recon capabilities", "/recon/capabilities/discover");
+    if (!audit.recon_plan) return post("Build recon plan", "/recon/plan");
+    // A valid recon pass may find no compatible capability.  Preserve that
+    // coverage gap in the snapshot instead of attempting to construct an
+    // invalid empty schedule.
+    if (!audit.recon_plan.steps?.length) return post("Finalize recon snapshot", "/recon/finalize");
+    if (!audit.recon_execution_schedule) return post("Schedule recon", "/recon/schedule");
+    const step = audit.recon_execution_schedule.steps?.find((item) => item.status === "READY");
+    if (step) return post("Run recon capability", `/recon/steps/${encodeURIComponent(step.plan_step_id)}/execute`);
+    const evidence = audit.raw_evidence?.find((item) => item.plan_step_id.startsWith("recon-") && !audit.recon_evidence_chunks?.some((chunk) => chunk.evidence_id === item.evidence_id));
+    if (evidence) return post("Interpret recon evidence", `/recon/evidence/${encodeURIComponent(evidence.evidence_id)}/normalize`);
+    if (!audit.recon_snapshot) return post("Finalize recon snapshot", "/recon/finalize");
+  }
+  if (stage === "PLAN") {
+    if (audit.validation_decision?.decision === "MORE_TESTING_REQUIRED") return post("Plan bounded follow-up", "/replan");
+    if (!audit.audit_plan) return post("Generate AI audit plan", "/plan/generate");
+    if (!audit.plan_validation) return post("Validate audit plan", "/plan/validate");
+  }
+  if (stage === "EXECUTE") {
+    if (!audit.execution_schedule) return post("Schedule audit steps", "/plan/schedule");
+    const step = audit.execution_schedule.steps?.find((item) => item.status === "READY");
+    if (step) return post("Run audit capability", `/steps/${encodeURIComponent(step.plan_step_id)}/execute`);
+  }
+  if (stage === "VALIDATE") return post("Validate evidence and findings", "/validation/finalize");
+  if (stage === "REPORT") {
+    if (!audit.report_snapshot) return post("Generate final report", "/report/generate");
+    return post("Close completed audit", "/close", { closed_by: "poc-autonomous", reason: "Report generated and no further safe work remains." });
+  }
+  return null;
 }
 
 // --- Main Render Function ---
@@ -156,9 +191,6 @@ function render() {
   if (!audit) return;
 
   // Header & Info
-  const idInput = $("#audit-id");
-  if (idInput && document.activeElement !== idInput) idInput.value = audit.id;
-
   const nameEl = $("#audit-name");
   if (nameEl) nameEl.textContent = audit.name || "Audit Engagement";
 
@@ -166,26 +198,17 @@ function render() {
   if (targetEl) targetEl.textContent = `${audit.target.target_type} · ${audit.target.identifier}`;
 
   const stateEl = $("#audit-state");
-  if (stateEl) stateEl.textContent = audit.state;
+  const currentStage = pipelineStage();
+  if (stateEl) stateEl.textContent = currentStage;
 
   const badgeEl = $("#lifecycle-badge");
-  if (badgeEl) badgeEl.textContent = audit.state;
+  if (badgeEl) badgeEl.textContent = stageProgress(currentStage)?.status || "READY";
 
-  updateStepper(audit.state);
+  updateStepper(currentStage);
 
-  const route = routes[audit.state];
-  const readyStep =
-    audit.state === "PLAN_SCHEDULED"
-      ? audit.execution_schedule?.steps.find((step) => step.status === "READY")
-      : null;
-  const blocked =
-    audit.state === "PLAN_PENDING_APPROVAL" ||
-    audit.state === "PLAN_REJECTED" ||
-    audit.state === "SCOPE_REJECTED";
-  const complete =
-    audit.state === "PLAN_SCHEDULED" &&
-    !readyStep &&
-    audit.execution_schedule?.steps.every((step) => step.status === "SUCCEEDED");
+  const action = nextAction();
+  const blocked = audit.state === "SCOPE_REJECTED" || audit.state === "PLAN_REJECTED";
+  const complete = currentStage === "CLOSED";
 
   let statusText = "Waiting for a runnable stage.";
   if (automationMode === "paused") {
@@ -195,13 +218,13 @@ function render() {
   } else if (blocked) {
     statusText = "Automation stopped: Requires manual approval or was rejected by policy.";
   } else if (complete) {
-    statusText = "All scheduled capabilities and plugins completed execution.";
+    statusText = "Audit closed. Its evidence-backed report remains available.";
+  } else if (currentStage === "OFFENSIVE") {
+    statusText = "Offensive actions are disabled in this POC.";
   } else if (inFlight) {
     statusText = "Autonomous agent is executing the current pipeline stage…";
-  } else if (route) {
-    statusText = `Next queued action: ${route[0]}.`;
-  } else if (readyStep) {
-    statusText = `Next queued action: Execute step ${readyStep.plan_step_id}.`;
+  } else if (action) {
+    statusText = `Next queued action: ${action.label}.`;
   }
 
   const autoStatusEl = $("#automation-status");
@@ -220,10 +243,8 @@ function render() {
   // Actions Container
   const actionsEl = $("#actions");
   if (actionsEl) {
-    if (route) {
-      actionsEl.innerHTML = `<span class="badge badge-accent">NEXT: ${esc(route[0])}</span>`;
-    } else if (readyStep) {
-      actionsEl.innerHTML = `<span class="badge badge-accent">NEXT: Execute ${esc(readyStep.plan_step_id)}</span>`;
+    if (action) {
+      actionsEl.innerHTML = `<span class="badge badge-accent">NEXT: ${esc(action.label)}</span>`;
     } else if (complete) {
       actionsEl.innerHTML = `<span class="badge badge-success">ALL STEPS COMPLETED</span>`;
     } else {
@@ -244,7 +265,7 @@ function render() {
           (step) => `
         <div class="item-card">
           <div class="item-header">
-            <span class="item-title">${esc(step.id)} · ${esc(step.capability)}</span>
+            <span class="item-title">${esc(step.capability)}</span>
             <span class="badge badge-muted">Step</span>
           </div>
           <div class="item-meta">
@@ -272,7 +293,7 @@ function render() {
           (step) => `
         <div class="item-card">
           <div class="item-header">
-            <span class="item-title">${esc(step.plan_step_id)}</span>
+            <span class="item-title">${esc(step.capability)}</span>
             ${getStatusBadge(step.status)}
           </div>
           <div class="item-meta">
@@ -299,7 +320,7 @@ function render() {
           (finding) => `
         <div class="item-card">
           <div class="item-header">
-            <span class="item-title">${esc(finding.title || finding.finding_id)}</span>
+            <span class="item-title">${esc(finding.title || "Security observation")}</span>
             <div style="display:flex;gap:4px">
               ${getStatusBadge(finding.severity || "INFO")}
               ${getStatusBadge(finding.state)}
@@ -356,9 +377,9 @@ async function loadEvents() {
   } catch (_) {}
 }
 
-// --- Load Audit by ID ---
-async function loadAudit(id = $("#audit-id")?.value.trim(), queue = true) {
-  if (!id) return toast("Please enter an Audit ID.", true);
+// --- Resume the locally active audit (no audit identifier is exposed in the UI) ---
+async function loadAudit(id, queue = true) {
+  if (!id) return;
   selectedAuditId = id;
   try {
     const loaded = await api(`/audits/${id}`);
@@ -375,22 +396,18 @@ async function loadAudit(id = $("#audit-id")?.value.trim(), queue = true) {
 // --- Autonomous Step Driver ---
 async function drive() {
   if (!audit || inFlight || automationMode !== "running") return;
-  const route = routes[audit.state];
-  const step =
-    audit.state === "PLAN_SCHEDULED"
-      ? audit.execution_schedule?.steps.find((item) => item.status === "READY")
-      : null;
-  if (!route && !step) return;
+  const action = nextAction();
+  if (!action) return;
 
   const auditId = audit.id;
   inFlight = true;
   render();
 
   try {
-    const endpoint = route
-      ? route[1]
-      : `/steps/${encodeURIComponent(step.plan_step_id)}/execute`;
-    const updated = await api(`/audits/${auditId}${endpoint}`, { method: "POST" });
+    const updated = await api(`/audits/${auditId}${action.path}`, {
+      method: "POST",
+      body: action.body ? JSON.stringify(action.body) : undefined,
+    });
     if (selectedAuditId !== auditId) return;
     audit = updated;
     render();
@@ -453,21 +470,10 @@ document.addEventListener("DOMContentLoaded", () => {
         setAutomation("running", "Agent queued: Validate scope.");
         render();
         scheduleDrive();
-        toast(`Audit created: ${audit.id}`);
+        toast("Audit created. Autonomous lifecycle started.");
       } catch (error) {
         toast(error.message, true);
       }
-    });
-  }
-
-  // Load Audit
-  const loadBtn = $("#load-audit");
-  if (loadBtn) loadBtn.addEventListener("click", () => loadAudit());
-
-  const auditIdInput = $("#audit-id");
-  if (auditIdInput) {
-    auditIdInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") loadAudit();
     });
   }
 
@@ -519,7 +525,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Polling active audit
   setInterval(() => audit && !inFlight && loadAudit(audit.id, false), 2500);
 
-  // Resume saved audit
+  // Resume the active local audit without presenting its internal identifier.
   const savedId = localStorage.getItem("security-audit-id");
   if (savedId) loadAudit(savedId);
 });

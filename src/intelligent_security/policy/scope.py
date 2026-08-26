@@ -91,7 +91,9 @@ def validate_scope(audit: Audit) -> ScopePolicy:
         raise ScopeValidationError("authorization_expired", "Authorization has expired.")
 
     normalizer = _normalize_network_asset
-    if audit.target.target_type == "source_repository":
+    if audit.target.target_type in {"web_application", "api", "llm_application"}:
+        normalizer = _normalize_host
+    elif audit.target.target_type == "source_repository":
         normalizer = lambda asset: _normalize_url(asset)[0]
     authorized_assets = sorted({normalizer(asset) for asset in audit.scope.authorized_assets})
     excluded_assets = sorted({normalizer(asset) for asset in audit.scope.excluded_assets})

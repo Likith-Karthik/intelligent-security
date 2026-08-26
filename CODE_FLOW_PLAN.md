@@ -1427,3 +1427,5 @@ flowchart TD
 - Offensive request remains disabled in API and UI.
 
 **Done when:** A fresh authorized audit progresses through Recon → Plan → Execute → Validate → Report without manual approvals for safe actions, survives restart, and produces an evidence-backed result with no mocks in the real-plugin integration path.
+
+**POC implementation:** The console accepts only a target type and identifier. It retains the audit ID internally for local resume but does not expose an audit-ID, reviewer, permission, or scan-control input. Its autonomous driver uses the persisted Stage 2 pipeline and advances through preparation, recon discovery/planning/execution/normalization, main planning/execution, validation, bounded replan, report generation, and closure. The only visible controls are Pause, Exit, and Restart; Offensive remains a read-only disabled state.

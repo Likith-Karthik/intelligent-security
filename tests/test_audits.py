@@ -197,6 +197,15 @@ def test_create_audit_persists_request_and_emits_event(tmp_path) -> None:
     assert audit["state"] == "CREATED"
     assert audit["credential_references"] == ["vault://security/staging-test-account"]
 
+    retrieved = client.get(f"/audits/{audit['id']}")
+    assert retrieved.status_code == 200
+    assert retrieved.json() == audit
+
+    events = client.get(f"/audits/{audit['id']}/events")
+    assert events.status_code == 200
+    assert events.json()[0]["event_type"] == "audit.created"
+    assert events.json()[0]["payload"] == {"state": "CREATED"}
+
 
 def test_offensive_boilerplate_is_persisted_and_fail_closed_without_execution(tmp_path) -> None:
     app = create_app(str(tmp_path / "audits.db"))
@@ -232,15 +241,31 @@ def test_offensive_boilerplate_is_persisted_and_fail_closed_without_execution(tm
     assert "offensive/run" not in ui
     assert "offensive/approve" not in ui
 
-    retrieved = client.get(f"/audits/{audit['id']}")
-    assert retrieved.status_code == 200
-    assert retrieved.json() == audit
 
-    events = client.get(f"/audits/{audit['id']}/events")
-    assert events.status_code == 200
-    assert events.json()[0]["event_type"] == "audit.created"
-    assert events.json()[0]["payload"] == {"state": "CREATED"}
+def test_stage2_console_has_no_operator_identifier_or_permission_inputs(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    html = client.get("/").text
+    javascript = client.get("/ui.js").text
 
+    assert 'id="audit-id"' not in html
+    assert "Paste Audit UUID" not in html
+    assert 'data-stage="RECON"' in html
+    assert 'data-stage="VALIDATE"' in html
+    assert 'data-stage="REPORT"' in html
+    assert 'data-stage="CLOSED"' in html
+    assert "recon/capabilities/discover" in javascript
+    assert "/validation/finalize" in javascript
+    assert "/report/generate" in javascript
+    assert "poc-autonomous" in javascript
+
+
+def test_scope_validation_accepts_an_ip_address_web_target(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    request = valid_request()
+    request["target"]["identifier"] = "http://127.0.0.1:8765"
+    request["scope"]["authorized_assets"] = ["127.0.0.1"]
+    created = client.post("/audits", json=request).json()
+    assert client.post(f"/audits/{created['id']}/scope/validate").status_code == 200
 
 def test_new_audit_has_a_versioned_pipeline(tmp_path) -> None:
     client = TestClient(create_app(str(tmp_path / "audits.db")))
@@ -515,6 +540,23 @@ def test_recon_planner_enforces_step_time_and_cost_limits(tmp_path) -> None:
     assert len(budget_limited.steps) == 1
     assert any("cost" in gap.reason for gap in budget_limited.coverage_gaps)
     assert any("time" in gap.reason for gap in budget_limited.coverage_gaps)
+
+
+def test_empty_recon_plan_finalizes_as_a_coverage_gap(tmp_path) -> None:
+    """A catalog with no executable recon plugin is a safe zero-work pass."""
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = prepare_recon_audit(client, recon_request())
+
+    assert client.post(f"/audits/{created['id']}/recon/capabilities/discover").status_code == 200
+    planned = client.post(f"/audits/{created['id']}/recon/plan")
+    assert planned.status_code == 200
+    assert planned.json()["recon_plan"]["steps"] == []
+
+    finalized = client.post(f"/audits/{created['id']}/recon/finalize")
+    assert finalized.status_code == 200
+    assert finalized.json()["recon_execution_schedule"] is None
+    assert finalized.json()["recon_snapshot"]["coverage_gaps"]
+    assert finalized.json()["pipeline"]["current_stage"] == "PLAN"
 
 
 def test_recon_planner_rejects_offensive_catalog_entries(tmp_path) -> None:

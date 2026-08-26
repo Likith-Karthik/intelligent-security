@@ -143,20 +143,7 @@
               <div class="audit-title-row">
                 <h2 id="audit-name">No audit selected</h2>
               </div>
-              <p id="audit-target" class="audit-target-text">Create an audit or paste an Audit ID.</p>
-            </div>
-            
-            <div class="audit-picker">
-              <div class="input-with-icon">
-                <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="11" cy="11" r="8"/>
-                  <line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                </svg>
-                <input id="audit-id" placeholder="Paste Audit UUID…" />
-              </div>
-              <button id="load-audit" class="btn btn-secondary">
-                <span>Load</span>
-              </button>
+              <p id="audit-target" class="audit-target-text">Create an audit to begin the autonomous lifecycle.</p>
             </div>
           </div>
 
@@ -171,7 +158,7 @@
               </div>
             </div>
             <h3>Ready when you are</h3>
-            <p class="empty-sub">Create a new engagement on the left, or load an existing audit by ID above to inspect its execution lifecycle, findings, and reports.</p>
+            <p class="empty-sub">Create a new engagement to see its live lifecycle, evidence-backed findings, and final report.</p>
             <div class="empty-steps">
               <div class="step-card">
                 <span class="step-num">1</span>
@@ -238,13 +225,13 @@
 
               <!-- Pipeline Stage Visualizer -->
               <div class="pipeline-stepper" id="pipeline-stepper">
-                <div class="pipeline-step" data-stage="CREATED"><span class="step-indicator"></span><span class="step-name">Scope</span></div>
-                <div class="pipeline-step" data-stage="SCOPE_VALIDATED"><span class="step-indicator"></span><span class="step-name">Profile</span></div>
-                <div class="pipeline-step" data-stage="TARGET_PROFILED"><span class="step-indicator"></span><span class="step-name">Discover</span></div>
-                <div class="pipeline-step" data-stage="CAPABILITIES_DISCOVERED"><span class="step-indicator"></span><span class="step-name">Plan</span></div>
-                <div class="pipeline-step" data-stage="PLAN_PROPOSED"><span class="step-indicator"></span><span class="step-name">Validate</span></div>
-                <div class="pipeline-step" data-stage="PLAN_APPROVED"><span class="step-indicator"></span><span class="step-name">Schedule</span></div>
-                <div class="pipeline-step" data-stage="PLAN_SCHEDULED"><span class="step-indicator"></span><span class="step-name">Execute</span></div>
+                <div class="pipeline-step" data-stage="PREFLIGHT"><span class="step-indicator"></span><span class="step-name">Prepare</span></div>
+                <div class="pipeline-step" data-stage="RECON"><span class="step-indicator"></span><span class="step-name">Recon</span></div>
+                <div class="pipeline-step" data-stage="PLAN"><span class="step-indicator"></span><span class="step-name">Plan</span></div>
+                <div class="pipeline-step" data-stage="EXECUTE"><span class="step-indicator"></span><span class="step-name">Execute</span></div>
+                <div class="pipeline-step" data-stage="VALIDATE"><span class="step-indicator"></span><span class="step-name">Validate</span></div>
+                <div class="pipeline-step" data-stage="REPORT"><span class="step-indicator"></span><span class="step-name">Report</span></div>
+                <div class="pipeline-step" data-stage="CLOSED"><span class="step-indicator"></span><span class="step-name">Closed</span></div>
               </div>
 
               <div id="actions" class="actions-container"></div>
