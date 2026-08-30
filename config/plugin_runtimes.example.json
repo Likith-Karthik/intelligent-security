@@ -20,19 +20,27 @@
     },
     {
       "plugin_id": "semgrep",
-      "adapter": "container_cli",
-      "runtime_reference": "cli-config://semgrep-approved-runtime",
-      "image_reference": "semgrep/semgrep:latest",
+      "adapter": "native",
+      "runtime_reference": "host-cli://semgrep-approved-runtime",
       "max_runtime_seconds": 300,
       "allowed_target_hosts": ["authorized.example.com", "github.com"],
       "enabled": true
     },
     {
       "plugin_id": "promptfoo",
-      "adapter": "llm_testing",
-      "runtime_reference": "cli-config://promptfoo-approved-runtime",
+      "adapter": "native",
+      "runtime_reference": "host-cli://promptfoo-approved-runtime",
       "max_runtime_seconds": 600,
       "allowed_target_hosts": ["authorized.example.com", "localhost", "127.0.0.1"],
+      "enabled": true
+    },
+    {
+      "plugin_id": "cisco-mcp-scanner",
+      "adapter": "container_cli",
+      "runtime_reference": "container-config://cisco-mcp-scanner-approved-runtime",
+      "image_reference": "sha256:replace-with-approved-image-id",
+      "max_runtime_seconds": 600,
+      "allowed_target_hosts": ["authorized-mcp.example.com"],
       "enabled": true
     }
   ]

@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/ui.css" />
+    <link rel="stylesheet" href="/ui.css?v=5" />
   </head>
   <body>
     <!-- Top Navigation / Header -->
@@ -238,6 +238,43 @@
               <p class="muted" id="offensive-status" aria-live="polite">Offensive actions: disabled in this POC.</p>
             </section>
 
+            <!-- Live recon intelligence: raw progress plus trusted normalized facts. -->
+            <section id="recon-results-panel" class="panel recon-results-panel" hidden>
+              <div class="card-title-bar">
+                <div class="title-with-icon">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <path d="m20 20-4-4"></path>
+                    <path d="M8 11h6"></path>
+                    <path d="M11 8v6"></path>
+                  </svg>
+                  <div>
+                    <p class="eyebrow">RECON INTELLIGENCE</p>
+                    <p class="recon-subtitle">Live plugin evidence plus normalized and deduplicated recon intelligence.</p>
+                  </div>
+                </div>
+                <span id="recon-snapshot-badge" class="badge badge-success">READY</span>
+              </div>
+              <div id="recon-live-status" class="recon-live-status" aria-live="polite"></div>
+              <div id="recon-summary" class="recon-summary-grid"></div>
+              <div class="recon-detail-grid">
+                <div>
+                  <p class="recon-section-label">DISCOVERED INFORMATION</p>
+                  <div id="recon-observations" class="recon-observations"></div>
+                </div>
+                <div class="recon-side-stack">
+                  <div>
+                    <p class="recon-section-label">PLUGIN & EVIDENCE STREAM</p>
+                    <div id="recon-tool-stream" class="recon-tool-stream"></div>
+                  </div>
+                  <div>
+                    <p class="recon-section-label">COVERAGE NOTES</p>
+                    <div id="recon-coverage" class="recon-coverage"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
             <!-- 4-Section Dashboard Grid -->
             <div class="dashboard-grid">
               
@@ -356,6 +393,6 @@
     <!-- Toast Notification -->
     <div id="toast" role="status" class="toast"></div>
 
-    <script src="/ui.js"></script>
+    <script src="/ui.js?v=5"></script>
   </body>
 </html>

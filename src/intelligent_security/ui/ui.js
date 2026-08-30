@@ -10,6 +10,12 @@ let selectedAuditId = null;
 let automationMode = localStorage.getItem("security-audit-automation") || "running";
 let inFlight = false;
 let driveTimer = null;
+let eventsInFlight = false;
+let lastEventsLoadedAt = 0;
+
+const TAB_ID = crypto.randomUUID();
+const AUTOMATION_LEASE_KEY = "security-audit-automation-lease-v2";
+const AUTOMATION_LEASE_MS = 12000;
 
 const STAGES = ["PREFLIGHT", "RECON", "PLAN", "EXECUTE", "VALIDATE", "REPORT", "CLOSED"];
 
@@ -44,6 +50,7 @@ function toast(message, error = false) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    cache: "no-store",
     headers: {
       "content-type": "application/json",
       ...(options.headers || {}),
@@ -87,6 +94,37 @@ function scheduleDrive() {
   if (automationMode === "running") {
     driveTimer = setTimeout(drive, 300);
   }
+}
+
+function readAutomationLease() {
+  try {
+    return JSON.parse(localStorage.getItem(AUTOMATION_LEASE_KEY) || "null");
+  } catch (_) {
+    return null;
+  }
+}
+
+function claimAutomationLease() {
+  if (!audit || automationMode !== "running") return false;
+  const now = Date.now();
+  const current = readAutomationLease();
+  if (current && current.owner !== TAB_ID && current.expiresAt > now) return false;
+  localStorage.setItem(AUTOMATION_LEASE_KEY, JSON.stringify({ owner: TAB_ID, auditId: audit.id, expiresAt: now + AUTOMATION_LEASE_MS }));
+  return readAutomationLease()?.owner === TAB_ID;
+}
+
+function renewAutomationLease() {
+  const current = readAutomationLease();
+  if (document.visibilityState !== "visible") {
+    releaseAutomationLease();
+    return;
+  }
+  if (!audit || automationMode !== "running" || current?.owner !== TAB_ID || current.auditId !== audit.id) return;
+  localStorage.setItem(AUTOMATION_LEASE_KEY, JSON.stringify({ ...current, expiresAt: Date.now() + AUTOMATION_LEASE_MS }));
+}
+
+function releaseAutomationLease() {
+  if (readAutomationLease()?.owner === TAB_ID) localStorage.removeItem(AUTOMATION_LEASE_KEY);
 }
 
 // --- Status Badge Stylers ---
@@ -158,7 +196,8 @@ function nextAction() {
     if (!audit.recon_execution_schedule) return post("Schedule recon", "/recon/schedule");
     const step = audit.recon_execution_schedule.steps?.find((item) => item.status === "READY");
     if (step) return post("Run recon capability", `/recon/steps/${encodeURIComponent(step.plan_step_id)}/execute`);
-    const evidence = audit.raw_evidence?.find((item) => item.plan_step_id.startsWith("recon-") && !audit.recon_evidence_chunks?.some((chunk) => chunk.evidence_id === item.evidence_id));
+    const normalizedEvidence = new Set(audit.recon_normalized_evidence_ids || []);
+    const evidence = audit.raw_evidence?.find((item) => item.plan_step_id.startsWith("recon-") && !normalizedEvidence.has(item.evidence_id));
     if (evidence) return post("Interpret recon evidence", `/recon/evidence/${encodeURIComponent(evidence.evidence_id)}/normalize`);
     if (!audit.recon_snapshot) return post("Finalize recon snapshot", "/recon/finalize");
   }
@@ -252,6 +291,10 @@ function render() {
     }
   }
 
+  // Show recon progress live, but label raw evidence separately from facts
+  // that passed normalization, scope filtering, and UI-level semantic dedupe.
+  renderReconResults(audit);
+
   // Plan Rendering
   const planSteps = audit.audit_plan?.steps || [];
   const planCountEl = $("#plan-count");
@@ -337,13 +380,135 @@ function render() {
     }
   }
 
-  loadEvents();
+  scheduleEventsLoad();
+}
+
+function renderReconResults(currentAudit) {
+  const panel = $("#recon-results-panel");
+  if (!panel) return;
+  const snapshot = currentAudit.recon_snapshot;
+  const reconPlan = currentAudit.recon_plan;
+  const reconSchedule = currentAudit.recon_execution_schedule;
+  const reconExecutions = (currentAudit.plugin_executions || []).filter((item) => String(item.plan_step_id || "").startsWith("recon-"));
+  const reconEvidence = (currentAudit.raw_evidence || []).filter((item) => String(item.plan_step_id || "").startsWith("recon-"));
+  const normalizedEvidence = new Set(currentAudit.recon_normalized_evidence_ids || []);
+  const scopedObservations = (currentAudit.recon_observations || []).filter((item) => item.scope_status === "IN_SCOPE");
+  const hasReconActivity = Boolean(currentAudit.recon_capability_discovery || reconPlan || reconExecutions.length || scopedObservations.length || snapshot);
+  panel.hidden = !hasReconActivity;
+  if (!hasReconActivity) return;
+
+  const uniqueMap = new Map();
+  scopedObservations.forEach((item) => {
+    const key = `${item.observation_type}|${item.value}|${item.parent_asset || ""}`;
+    const existing = uniqueMap.get(key);
+    if (!existing || Number(item.confidence || 0) > Number(existing.confidence || 0)) uniqueMap.set(key, item);
+  });
+  const uniqueObservations = [...uniqueMap.values()];
+  const duplicateCount = Math.max(0, scopedObservations.length - uniqueObservations.length);
+  const scheduledSteps = reconSchedule?.steps || [];
+  const completedSteps = scheduledSteps.filter((item) => ["SUCCEEDED", "FAILED", "CAPABILITY_UNAVAILABLE"].includes(item.status)).length;
+  const pendingNormalization = reconEvidence.filter((item) => !normalizedEvidence.has(item.evidence_id)).length;
+  const currentAction = nextAction();
+  const normalizingNow = inFlight && currentAction?.path?.includes("/recon/evidence/") && currentAction?.path?.endsWith("/normalize");
+
+  const categories = [
+    ["assets", "Assets", "Domains and hosts"],
+    ["services", "Services", "Reachable services"],
+    ["technologies", "Technologies", "Detected stack signals"],
+    ["endpoints", "Endpoints", "Observed paths"],
+    ["interfaces", "Interfaces", "Observed URLs"],
+  ];
+  const liveValues = Object.fromEntries(categories.map(([key]) => [key, []]));
+  uniqueObservations.forEach((item) => {
+    const key = `${item.observation_type}s`;
+    if (liveValues[key]) liveValues[key].push(item.value);
+  });
+  categories.forEach(([key]) => { liveValues[key] = [...new Set(liveValues[key])].sort(); });
+  const values = snapshot || liveValues;
+
+  const liveStatus = $("#recon-live-status");
+  if (liveStatus) {
+    liveStatus.innerHTML = `
+      <div class="recon-phase ${inFlight && pipelineStage() === "RECON" ? "is-live" : ""}">
+        <span class="live-dot"></span>
+        <div><strong>${snapshot ? "Recon snapshot finalized" : normalizingNow ? "AI is normalizing evidence" : "Recon is collecting intelligence"}</strong>
+        <span>${snapshot ? "The planner is using this immutable evidence snapshot." : `${completedSteps}/${scheduledSteps.length || reconPlan?.steps?.length || 0} plugin steps complete`}</span></div>
+      </div>
+      <div class="recon-process-stats">
+        <span><strong>${reconEvidence.length}</strong> evidence packages</span>
+        <span><strong>${scopedObservations.length}</strong> normalized records</span>
+        <span><strong>${uniqueObservations.length}</strong> unique facts</span>
+        <span class="dedupe-stat"><strong>${duplicateCount}</strong> duplicates collapsed</span>
+        ${pendingNormalization ? `<span class="pending-stat"><strong>${pendingNormalization}</strong> awaiting normalization</span>` : ""}
+      </div>`;
+  }
+
+  const summary = $("#recon-summary");
+  if (summary) {
+    summary.innerHTML = categories.map(([key, label]) => `
+      <div class="recon-stat">
+        <span class="recon-stat-value">${(values[key] || []).length}</span>
+        <span class="recon-stat-label">${esc(label)}</span>
+      </div>`).join("");
+  }
+
+  const observationContainer = $("#recon-observations");
+  if (observationContainer) {
+    const observationByValue = new Map(uniqueObservations.map((item) => [`${item.observation_type}|${item.value}`, item]));
+    const items = categories.flatMap(([key, label, description]) => (values[key] || []).map((value) => {
+      const observation = observationByValue.get(`${key.slice(0, -1)}|${value}`);
+      return { label, description, value, observation };
+    }));
+    observationContainer.innerHTML = items.length
+      ? items.map((item) => `
+          <div class="recon-observation">
+            <div><span class="badge badge-info">${esc(item.label)}</span><span class="recon-value">${esc(item.value)}</span></div>
+            <span class="recon-description">${esc(item.observation?.normalized_summary || item.description)}</span>
+            ${item.observation ? `<span class="recon-provenance">${item.observation.model_assisted ? "AI normalized" : "Deterministically extracted"} · ${Math.round(Number(item.observation.confidence || 0) * 100)}% confidence</span>` : ""}
+          </div>`).join("")
+      : `<p class="muted">${reconEvidence.length ? "Evidence received; waiting for normalized in-scope facts." : "Waiting for recon plugins to return evidence."}</p>`;
+  }
+
+  const toolStream = $("#recon-tool-stream");
+  if (toolStream) {
+    const planned = reconPlan?.steps || [];
+    toolStream.innerHTML = planned.length ? planned.map((step) => {
+      const scheduled = scheduledSteps.find((item) => item.plan_step_id === step.step_id);
+      const execution = reconExecutions.find((item) => item.plan_step_id === step.step_id);
+      const evidenceReady = Boolean(execution?.evidence_record_id);
+      const isNormalized = evidenceReady && normalizedEvidence.has(execution.evidence_record_id);
+      const status = execution?.status || scheduled?.status || "PLANNED";
+      return `<div class="recon-tool-item">
+        <div><span class="recon-value">${esc(step.capability)}</span>${getStatusBadge(status)}</div>
+        <span>${execution?.plugin_id ? `Executed by ${esc(execution.plugin_id)} · ` : ""}${isNormalized ? "Evidence normalized" : evidenceReady ? "Evidence captured" : "Waiting to run"}</span>
+      </div>`;
+    }).join("") : '<p class="muted">Discovering compatible recon capabilities…</p>';
+  }
+
+  const coverageContainer = $("#recon-coverage");
+  if (coverageContainer) {
+    const gaps = snapshot?.coverage_gaps || reconPlan?.coverage_gaps || [];
+    coverageContainer.innerHTML = gaps.length
+      ? gaps.map((gap) => `
+          <div class="recon-gap">
+            <span class="badge badge-warning">${esc(gap.capability_family || "Coverage gap")}</span>
+            <p>${esc(gap.reason || "This area was not covered during recon.")}</p>
+          </div>`).join("")
+      : '<div class="recon-covered"><span>✓</span> All planned recon areas completed.</div>';
+  }
+
+  const badge = $("#recon-snapshot-badge");
+  if (badge) {
+    badge.className = `badge ${snapshot ? "badge-success" : "badge-accent recon-live-badge"}`;
+    badge.textContent = snapshot ? "FINALIZED" : "● LIVE";
+  }
 }
 
 // --- Events Timeline Loader ---
 async function loadEvents() {
-  if (!audit) return;
+  if (!audit || eventsInFlight) return;
   const auditId = audit.id;
+  eventsInFlight = true;
   try {
     const events = await api(`/audits/${auditId}/events`);
     if (selectedAuditId !== auditId) return;
@@ -374,7 +539,17 @@ async function loadEvents() {
         eventsEl.innerHTML = '<p class="muted">No events yet.</p>';
       }
     }
-  } catch (_) {}
+  } catch (_) {
+  } finally {
+    eventsInFlight = false;
+  }
+}
+
+function scheduleEventsLoad(force = false) {
+  const now = Date.now();
+  if (!force && now - lastEventsLoadedAt < 5000) return;
+  lastEventsLoadedAt = now;
+  loadEvents();
 }
 
 // --- Resume the locally active audit (no audit identifier is exposed in the UI) ---
@@ -396,6 +571,15 @@ async function loadAudit(id, queue = true) {
 // --- Autonomous Step Driver ---
 async function drive() {
   if (!audit || inFlight || automationMode !== "running") return;
+  if (document.visibilityState !== "visible") {
+    releaseAutomationLease();
+    return;
+  }
+  if (!claimAutomationLease()) {
+    clearTimeout(driveTimer);
+    driveTimer = setTimeout(drive, 1500);
+    return;
+  }
   const action = nextAction();
   if (!action) return;
 
@@ -466,6 +650,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
         selectedAuditId = created.id;
         audit = created;
+        // Creating a new audit is an explicit takeover by this tab.
+        localStorage.removeItem(AUTOMATION_LEASE_KEY);
         localStorage.setItem("security-audit-id", audit.id);
         setAutomation("running", "Agent queued: Validate scope.");
         render();
@@ -482,6 +668,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (pauseBtn) {
     pauseBtn.addEventListener("click", () => {
       setAutomation("paused", "Paused. The current plugin process is allowed to finish, but no next step starts.");
+      releaseAutomationLease();
       render();
     });
   }
@@ -490,6 +677,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (exitBtn) {
     exitBtn.addEventListener("click", () => {
       setAutomation("exited", "Exited. The audit is preserved; Restart resumes from its last safe state.");
+      releaseAutomationLease();
       render();
     });
   }
@@ -522,8 +710,25 @@ document.addEventListener("DOMContentLoaded", () => {
       if (connText) connText.textContent = "API unavailable";
     });
 
-  // Polling active audit
-  setInterval(() => audit && !inFlight && loadAudit(audit.id, false), 2500);
+  // One visible tab drives mutations. Other tabs remain read-only and sync to
+  // the most recently selected audit instead of continuing an older audit.
+  setInterval(renewAutomationLease, 4000);
+  setInterval(() => document.visibilityState === "visible" && audit && !inFlight && loadAudit(audit.id, false), 3000);
+  window.addEventListener("storage", (event) => {
+    if (event.key === "security-audit-id" && event.newValue && event.newValue !== selectedAuditId) {
+      loadAudit(event.newValue);
+    }
+    if (event.key === AUTOMATION_LEASE_KEY && automationMode === "running") scheduleDrive();
+  });
+  window.addEventListener("beforeunload", releaseAutomationLease);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      releaseAutomationLease();
+      clearTimeout(driveTimer);
+    } else if (audit) {
+      loadAudit(audit.id);
+    }
+  });
 
   // Resume the active local audit without presenting its internal identifier.
   const savedId = localStorage.getItem("security-audit-id");

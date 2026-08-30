@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
@@ -34,7 +35,7 @@ from .domain import (
     ScheduledStepStatus,
 )
 from .execution.runtime_profiles import PluginRuntimeProfileRegistry
-from .execution.adapters import ContainerCliAdapter
+from .execution.adapters import ContainerCliAdapter, NativeCliAdapter, RestAdapter
 from .execution.service import ExecutionError, ExecutionService
 from .evidence.artifact_store import ArtifactStore
 from .evidence.collector import EvidenceCollector
@@ -88,7 +89,11 @@ def create_app(
     app.state.evidence_store = ArtifactStore(evidence_directory or os.getenv("EVIDENCE_DIRECTORY", "data/evidence"))
     app.state.execution_service = ExecutionService(
         PluginRuntimeProfileRegistry(plugin_runtime_profiles_path),
-        {"container_cli": ContainerCliAdapter()},
+        {
+            "container_cli": ContainerCliAdapter(),
+            "native": NativeCliAdapter(),
+            "rest": RestAdapter(),
+        },
         EvidenceCollector(app.state.evidence_store),
     )
     app.state.evidence_normalizer = AIEvidenceNormalizer(app.state.evidence_store, app.state.intelligence_service)
@@ -102,6 +107,10 @@ def create_app(
     app.state.recon_policy = default_recon_policy()
     app.state.recon_planner = ReconPlanner()
     app.state.recon_normalizer = ReconNormalizer(app.state.intelligence_service)
+    # Normalization is model-backed and must not run twice when two UI tabs
+    # race on the same evidence record. The persisted evidence-id marker makes
+    # retries idempotent; this lock closes the read-before-save race in-process.
+    app.state.recon_normalization_lock = threading.Lock()
 
     @app.get("/", include_in_schema=False)
     def audit_console() -> FileResponse:
@@ -170,7 +179,12 @@ def create_app(
             is_enabled_runtime = bool(runtime.enabled) if runtime else False
 
             cli_avail, cli_path, bin_name = find_cli_binary(manifest.plugin_id)
-            docker_avail = bool(docker_path and runtime and runtime.image_reference)
+            docker_avail = bool(
+                docker_path
+                and runtime
+                and runtime.adapter.value == "container_cli"
+                and runtime.image_reference
+            )
 
             # Plugin is active if manifest enabled AND (runtime profile active OR CLI binary available on host)
             is_active = is_enabled_manifest and (is_enabled_runtime or cli_avail)
@@ -181,6 +195,9 @@ def create_app(
             elif is_enabled_manifest and cli_avail:
                 mode = "host_cli"
                 mode_label = f"Active (Host CLI: {cli_path})"
+            elif is_enabled_manifest and is_enabled_runtime and runtime and runtime.adapter.value == "rest":
+                mode = "service"
+                mode_label = "Active (Local Service)"
             elif is_enabled_manifest and (is_enabled_runtime or docker_avail):
                 mode = "docker"
                 mode_label = "Active (Docker Container)"
@@ -529,23 +546,44 @@ def create_app(
         if pipeline.current_stage != PipelineStage.VALIDATE:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Validation finalization requires the VALIDATE pipeline stage")
         try:
-            if next(item for item in pipeline.stages if item.stage == PipelineStage.VALIDATE).status == StageStatus.READY:
+            validation_progress = next(item for item in pipeline.stages if item.stage == PipelineStage.VALIDATE)
+            if validation_progress.status == StageStatus.READY:
                 app.state.audit_pipeline_service.transition(audit, PipelineTransitionRequest(stage=PipelineStage.VALIDATE, status=StageStatus.RUNNING))
-            audit = app.state.audit_repository.save_with_event(audit, "validation.started", {"evidence_count": len(audit.raw_evidence)})
-            normalized = {item.evidence_id for item in audit.observation_normalizations if item.status.value == "SUCCEEDED"}
+                audit = app.state.audit_repository.save_with_event(audit, "validation.started", {"evidence_count": len(audit.raw_evidence)})
+            processed = {item.evidence_id for item in audit.observation_normalizations}
             for evidence in audit.raw_evidence:
-                if evidence.evidence_id in normalized:
+                if evidence.evidence_id in processed:
                     continue
                 package = app.state.capability_registry.active_snapshot().package_for_plugin(evidence.plugin_id or "")
                 result, observations = app.state.evidence_normalizer.normalize(audit, evidence, package)
                 audit.observation_normalizations.append(result)
                 audit.observations.extend(observations)
-            if not audit.candidate_findings:
+                audit = app.state.audit_repository.save_with_event(
+                    audit,
+                    "evidence.normalized" if result.status.value != "FAILED" else "evidence.normalization_failed",
+                    {
+                        "evidence_id": str(evidence.evidence_id),
+                        "status": result.status.value,
+                        "accepted_count": result.accepted_count,
+                        "rejected_count": result.rejected_count,
+                    },
+                )
+            if audit.finding_correlation_completed_at is None:
                 audit.candidate_findings = app.state.finding_correlator.correlate(audit)
+                audit.finding_correlation_completed_at = datetime.now(timezone.utc)
+                audit = app.state.audit_repository.save_with_event(
+                    audit, "findings.correlated", {"candidate_count": len(audit.candidate_findings)}
+                )
             audit.validation_decision = app.state.finding_validator.finalize(audit)
         except ValidationFinalizationError as error:
+            app.state.audit_repository.save_with_event(
+                audit, "validation.failed", {"code": error.code, "message": error.message}
+            )
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": error.code, "message": error.message})
         except Exception as error:
+            app.state.audit_repository.save_with_event(
+                audit, "validation.failed", {"code": "validation_failed", "message": str(error)}
+            )
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": "validation_failed", "message": str(error)})
 
         decision = audit.validation_decision
@@ -1117,24 +1155,30 @@ def create_app(
 
     @app.post("/audits/{audit_id}/recon/evidence/{evidence_id}/normalize", response_model=Audit)
     def normalize_recon_evidence(audit_id: UUID, evidence_id: UUID) -> Audit:
-        audit = app.state.audit_repository.get(audit_id)
-        if audit is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
-        try:
-            observations, chunks, provenance = app.state.recon_normalizer.normalize(audit, evidence_id, app.state.evidence_store)
-        except ReconNormalizationError as error:
-            raise HTTPException(
-                status_code=(status.HTTP_503_SERVICE_UNAVAILABLE if error.code == "model_normalization_failed" else status.HTTP_422_UNPROCESSABLE_CONTENT),
-                detail={"code": error.code, "message": error.message},
+        with app.state.recon_normalization_lock:
+            # Reload after acquiring the lock so a request queued behind an
+            # earlier normalization observes its persisted completion marker.
+            audit = app.state.audit_repository.get(audit_id)
+            if audit is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audit not found")
+            if evidence_id in audit.recon_normalized_evidence_ids:
+                return audit
+            try:
+                observations, chunks, provenance = app.state.recon_normalizer.normalize(audit, evidence_id, app.state.evidence_store)
+            except ReconNormalizationError as error:
+                raise HTTPException(
+                    status_code=(status.HTTP_503_SERVICE_UNAVAILABLE if error.code == "model_normalization_failed" else status.HTTP_422_UNPROCESSABLE_CONTENT),
+                    detail={"code": error.code, "message": error.message},
+                )
+            existing = {(item.observation_type, item.value, item.parent_asset, item.source_evidence_id) for item in audit.recon_observations}
+            accepted = [item for item in observations if (item.observation_type, item.value, item.parent_asset, item.source_evidence_id) not in existing]
+            audit.recon_observations.extend(accepted)
+            known_chunks = {item.chunk_id for item in audit.recon_evidence_chunks}
+            audit.recon_evidence_chunks.extend(item for item in chunks if item.chunk_id not in known_chunks)
+            audit.recon_normalized_evidence_ids.append(evidence_id)
+            return app.state.audit_repository.save_with_event(
+                audit, "recon.observation_accepted", {"evidence_id": str(evidence_id), "accepted_count": len(accepted), "chunk_count": len(chunks), "model_profile_id": provenance.get("model_profile_id")}
             )
-        existing = {(item.observation_type, item.value, item.parent_asset, item.source_evidence_id) for item in audit.recon_observations}
-        accepted = [item for item in observations if (item.observation_type, item.value, item.parent_asset, item.source_evidence_id) not in existing]
-        audit.recon_observations.extend(accepted)
-        known_chunks = {item.chunk_id for item in audit.recon_evidence_chunks}
-        audit.recon_evidence_chunks.extend(item for item in chunks if item.chunk_id not in known_chunks)
-        return app.state.audit_repository.save_with_event(
-            audit, "recon.observation_accepted", {"evidence_id": str(evidence_id), "accepted_count": len(accepted), "chunk_count": len(chunks), "model_profile_id": provenance.get("model_profile_id")}
-        )
 
     @app.post("/audits/{audit_id}/recon/finalize", response_model=Audit)
     def finalize_recon(audit_id: UUID) -> Audit:

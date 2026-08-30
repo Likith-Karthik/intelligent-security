@@ -13,9 +13,11 @@ from intelligent_security.evidence.artifact_store import ArtifactStore
 from intelligent_security.evidence.collector import EvidenceCollector
 from intelligent_security.evidence.normalizer import AIEvidenceNormalizer, EvidenceNormalizer
 from intelligent_security.findings.correlator import AIFindingCorrelator
+from intelligent_security.findings.service import AIFindingValidator
 from intelligent_security.reporting.generator import ReportGenerator
 from intelligent_security.execution.runtime_profiles import PluginRuntimeProfile
 from intelligent_security.domain import (
+    Audit,
     AuditOperation,
     CapabilityCandidate,
     CapabilityDiscovery,
@@ -264,10 +266,40 @@ def test_stage2_console_has_no_operator_identifier_or_permission_inputs(tmp_path
     assert 'data-stage="VALIDATE"' in html
     assert 'data-stage="REPORT"' in html
     assert 'data-stage="CLOSED"' in html
+    assert 'id="recon-results-panel"' in html
     assert "recon/capabilities/discover" in javascript
+    assert "renderReconResults" in javascript
+    assert "normalized and deduplicated" in html.lower()
+    assert "AUTOMATION_LEASE_KEY" in javascript
+    assert 'cache: "no-store"' in javascript
+    assert 'document.visibilityState !== "visible"' in javascript
+    assert "recon_normalized_evidence_ids" in javascript
+    assert 'id="recon-live-status"' in html
+    assert 'id="recon-tool-stream"' in html
+    assert "duplicates collapsed" in javascript
     assert "/validation/finalize" in javascript
     assert "/report/generate" in javascript
     assert "poc-autonomous" in javascript
+
+
+def test_ai_validation_can_close_an_audit_with_no_candidate_findings(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "audits.db")))
+    created = client.post("/audits", json=valid_request()).json()
+    audit = Audit.model_validate(created)
+
+    class Intelligence:
+        def generate(self, purpose, system_prompt, context):
+            assert purpose == "finding_validation"
+            assert context["findings"] == []
+            return (
+                {"analyses": [], "decision": "REPORT_READY", "finding_ids": [],
+                 "reason": "No candidate findings remain after evidence correlation."},
+                {"model_profile_id": "test-ai", "input_digest": "a" * 64, "output_digest": "b" * 64},
+            )
+
+    decision = AIFindingValidator(Intelligence()).finalize(audit)
+    assert decision.decision.value == "REPORT_READY"
+    assert decision.finding_ids == []
 
 
 def test_scope_validation_accepts_an_ip_address_web_target(tmp_path) -> None:
@@ -711,7 +743,9 @@ def test_main_plan_uses_finalized_recon_snapshot_and_executable_plugin_catalog(t
             return {"steps": [{"id": "headers", "capability": "web.header_review", "depends_on": [], "inputs": {}, "reason": "Review the reachable recon interface."}]}
 
     class ReconIntelligence:
+        def __init__(self): self.calls = 0
         def generate(self, purpose, system_prompt, context):
+            self.calls += 1
             assert purpose == "recon_normalization"
             assert context["chunks"]
             return ({"observations": [{
@@ -723,7 +757,8 @@ def test_main_plan_uses_finalized_recon_snapshot_and_executable_plugin_catalog(t
     gateway = ModelGateway()
     app.state.execution_service.adapters["container_cli"] = PluginAdapter()
     app.state.audit_planner = AuditPlanner(gateway)
-    app.state.recon_normalizer = ReconNormalizer(ReconIntelligence())
+    recon_intelligence = ReconIntelligence()
+    app.state.recon_normalizer = ReconNormalizer(recon_intelligence)
     client = TestClient(app)
     request = valid_request()
     request["authorization"]["allowed_operations"] = ["port_discovery", "web_scan"]
@@ -734,6 +769,12 @@ def test_main_plan_uses_finalized_recon_snapshot_and_executable_plugin_catalog(t
     executed = client.post(f"/audits/{created['id']}/recon/steps/recon-01/execute").json()
     evidence_id = executed["raw_evidence"][-1]["evidence_id"]
     assert client.post(f"/audits/{created['id']}/recon/evidence/{evidence_id}/normalize").status_code == 200
+    repeated = client.post(f"/audits/{created['id']}/recon/evidence/{evidence_id}/normalize")
+    assert repeated.status_code == 200
+    assert repeated.json()["recon_normalized_evidence_ids"] == [evidence_id]
+    assert recon_intelligence.calls == 1
+    events = client.get(f"/audits/{created['id']}/events").json()
+    assert len([event for event in events if event["event_type"] == "recon.observation_accepted"]) == 1
     finalized = client.post(f"/audits/{created['id']}/recon/finalize")
 
     generated = client.post(f"/audits/{created['id']}/plan/generate")

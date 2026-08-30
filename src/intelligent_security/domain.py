@@ -178,9 +178,25 @@ class PluginExecutionSpec(BaseModel):
 
     adapter: PluginAdapter
     target_input: str = Field(default="url", pattern=r"^(url|hostname)$")
-    arguments: List[str] = Field(..., min_length=1, max_length=100)
+    arguments: List[str] = Field(default_factory=list, max_length=100)
     mounts: List[PluginPackageMount] = Field(default_factory=list, max_length=20)
     output_format: str = Field(default="jsonl", pattern=r"^(jsonl|text)$")
+    request_method: Optional[str] = Field(default=None, pattern=r"^(GET|POST)$")
+    request_path: Optional[str] = Field(default=None, pattern=r"^/[A-Za-z0-9_./-]*$")
+    request_body: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def validate_adapter_shape(self):
+        if self.adapter in {PluginAdapter.CONTAINER_CLI, PluginAdapter.NATIVE} and not self.arguments:
+            raise ValueError("CLI execution specifications require at least one fixed argument.")
+        if self.adapter == PluginAdapter.REST:
+            if not self.request_method or not self.request_path:
+                raise ValueError("REST execution specifications require request_method and request_path.")
+            if self.arguments or self.mounts:
+                raise ValueError("REST execution specifications cannot declare CLI arguments or mounts.")
+        elif self.request_method or self.request_path or self.request_body is not None:
+            raise ValueError("HTTP request fields are only valid for REST execution specifications.")
+        return self
 
 
 class NormalizerField(BaseModel):
@@ -890,6 +906,7 @@ class Audit(BaseModel):
     recon_plan_scheduled_at: Optional[datetime] = None
     recon_observations: List[ReconObservation] = Field(default_factory=list)
     recon_evidence_chunks: List[ReconEvidenceChunk] = Field(default_factory=list)
+    recon_normalized_evidence_ids: List[UUID] = Field(default_factory=list)
     recon_snapshot: Optional[ReconSnapshot] = None
     recon_evidence_pack: Optional[ReconEvidencePack] = None
     capability_discovery: Optional[CapabilityDiscovery] = None
@@ -908,6 +925,7 @@ class Audit(BaseModel):
     observations: List[Observation] = Field(default_factory=list)
     observation_normalizations: List[ObservationNormalization] = Field(default_factory=list)
     candidate_findings: List[CandidateFinding] = Field(default_factory=list)
+    finding_correlation_completed_at: Optional[datetime] = None
     validation_decision: Optional[ValidationDecision] = None
     replan_history: List[ReplanRecord] = Field(default_factory=list, max_length=100)
     report_snapshot: Optional[ReportSnapshot] = None
@@ -919,6 +937,20 @@ class Audit(BaseModel):
     closed_at: Optional[datetime] = None
     closed_by: Optional[str] = None
     close_reason: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_recon_normalization_markers(cls, value):
+        """Treat persisted chunks as successful markers for pre-marker audits."""
+        if isinstance(value, dict) and "recon_normalized_evidence_ids" not in value:
+            migrated = dict(value)
+            migrated["recon_normalized_evidence_ids"] = list(dict.fromkeys(
+                str(chunk.get("evidence_id"))
+                for chunk in migrated.get("recon_evidence_chunks", [])
+                if isinstance(chunk, dict) and chunk.get("evidence_id")
+            ))
+            return migrated
+        return value
 
 
 class AuditEvent(BaseModel):

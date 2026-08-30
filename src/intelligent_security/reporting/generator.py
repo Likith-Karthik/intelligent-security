@@ -29,6 +29,10 @@ class ReportGenerator:
                 "inconclusive_candidate_count": len(inconclusive),
                 "observations_normalized": len(audit.observations),
                 "plugin_executions": len(audit.plugin_executions),
+                "evidence_processing_failures": sum(
+                    item.status == "FAILED" for item in audit.observation_normalizations
+                ),
+                "qualification": self._result_qualification(audit, confirmed, inconclusive),
             },
             "scope": {
                 "authorized_assets": audit.scope.authorized_assets,
@@ -106,6 +110,7 @@ class ReportGenerator:
             "- Confirmed findings: {}".format(report["executive_summary"]["confirmed_finding_count"]),
             "- Inconclusive candidates: {}".format(report["executive_summary"]["inconclusive_candidate_count"]),
             "- Normalized observations: {}".format(report["executive_summary"]["observations_normalized"]), "",
+            "Result qualification: {}".format(self._escape(report["executive_summary"]["qualification"])), "",
             "## Scope and exclusions", "",
             "- Authorized assets: {}".format(", ".join("`{}`".format(self._escape(item)) for item in report["scope"]["authorized_assets"])),
             "- Excluded assets: {}".format(", ".join("`{}`".format(self._escape(item)) for item in report["scope"]["excluded_assets"]) or "None"), "",
@@ -173,7 +178,37 @@ class ReportGenerator:
             limitations.append("No plugin execution evidence was captured.")
         if any(item.state == FindingState.VALIDATION_PENDING for item in audit.candidate_findings):
             limitations.append("Some candidates remain pending validation and are excluded from confirmed findings.")
+        failed_normalizations = [item for item in audit.observation_normalizations if item.status == "FAILED"]
+        if failed_normalizations:
+            limitations.append(
+                "AI evidence normalization failed for {} evidence record(s); zero confirmed findings must not be interpreted as a clean security result."
+                .format(len(failed_normalizations))
+            )
+        failed_executions = [item for item in audit.plugin_executions if item.status == "FAILED"]
+        if failed_executions:
+            limitations.append(
+                "{} plugin execution(s) failed and did not provide usable coverage."
+                .format(len(failed_executions))
+            )
+        if audit.recon_snapshot and audit.recon_snapshot.coverage_gaps:
+            limitations.append(
+                "Recon recorded {} capability coverage gap(s)."
+                .format(len(audit.recon_snapshot.coverage_gaps))
+            )
         return limitations
+
+    @staticmethod
+    def _result_qualification(audit: Audit, confirmed: list, inconclusive: list) -> str:
+        failed_normalization = any(item.status == "FAILED" for item in audit.observation_normalizations)
+        failed_execution = any(item.status == "FAILED" for item in audit.plugin_executions)
+        coverage_gaps = bool(audit.recon_snapshot and audit.recon_snapshot.coverage_gaps)
+        if failed_normalization or failed_execution or coverage_gaps:
+            return (
+                "Partial result: processing failures or coverage gaps occurred. Finding counts do not establish that the target is secure."
+            )
+        if confirmed or inconclusive:
+            return "Evidence-backed findings were produced within the recorded audit scope."
+        return "No findings were confirmed within the completed checks; this is not a guarantee that the target is secure."
 
     @staticmethod
     def _event(event: AuditEvent) -> dict:

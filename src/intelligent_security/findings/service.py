@@ -50,8 +50,6 @@ class AIFindingValidator:
 
     def finalize(self, audit: Audit) -> ValidationDecision:
         findings = {finding.finding_id: finding for finding in audit.candidate_findings}
-        if not findings:
-            raise ValidationFinalizationError("no_candidate_findings", "Validation requires at least one correlated candidate finding.")
         evidence_ids = {evidence.evidence_id for evidence in audit.raw_evidence}
         context = {
             "findings": [finding.model_dump(mode="json") for finding in audit.candidate_findings],

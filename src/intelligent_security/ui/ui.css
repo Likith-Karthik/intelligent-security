@@ -107,6 +107,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   padding: 0;
@@ -533,6 +537,16 @@ input:focus, select:focus {
   min-width: 0;
 }
 
+/* Major audit partitions deliberately share one vertical gutter. Without this
+   wrapper rule, lifecycle, recon intelligence, and the dashboard visually
+   touch even though their internal cards have spacing. */
+.audit-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
 .audit-bar {
   display: flex;
   align-items: center;
@@ -781,6 +795,112 @@ input:focus, select:focus {
   align-items: center;
   gap: 10px;
 }
+
+/* ==========================================================================
+   Recon Intelligence
+   ========================================================================== */
+
+.recon-results-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.recon-subtitle {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.recon-live-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 13px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--panel-border);
+  background: linear-gradient(90deg, var(--accent-bg-subtle), var(--btn-secondary-bg));
+}
+
+.recon-phase { display: flex; align-items: center; gap: 10px; min-width: 220px; }
+.recon-phase > div { display: flex; flex-direction: column; }
+.recon-phase strong { font-size: 12px; color: var(--text-main); }
+.recon-phase span:not(.live-dot) { font-size: 10.5px; color: var(--text-muted); }
+.live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--color-success); box-shadow: 0 0 10px var(--color-success); flex: 0 0 auto; }
+.recon-phase.is-live .live-dot, .recon-live-badge { animation: pulse-ring 1.5s infinite; }
+
+.recon-process-stats { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+.recon-process-stats span { padding: 4px 7px; border: 1px solid var(--panel-border); border-radius: var(--radius-pill); font: 10px var(--font-mono); color: var(--text-muted); background: var(--panel-bg); }
+.recon-process-stats strong { color: var(--text-main); }
+.recon-process-stats .dedupe-stat { color: var(--color-success); border-color: var(--color-success-border); }
+.recon-process-stats .pending-stat { color: var(--color-warning); border-color: var(--color-warning-border); }
+
+.recon-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.recon-stat {
+  padding: 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-md);
+  background: var(--btn-secondary-bg);
+}
+
+.recon-stat-value {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent-primary);
+}
+
+.recon-stat-label, .recon-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.recon-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
+  gap: 18px;
+}
+
+.recon-section-label { margin-bottom: 9px; }
+
+.recon-observations, .recon-coverage, .recon-tool-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.recon-side-stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.recon-tool-stream { max-height: 180px; }
+.recon-tool-item { padding: 9px 11px; border: 1px solid var(--panel-border); border-radius: var(--radius-md); background: var(--btn-secondary-bg); }
+.recon-tool-item > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recon-tool-item > span { display: block; margin-top: 5px; font-size: 10.5px; color: var(--text-dim); }
+
+.recon-observation, .recon-gap, .recon-covered {
+  padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-md);
+  background: var(--btn-secondary-bg);
+}
+
+.recon-observation > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.recon-value { overflow-wrap: anywhere; font: 11.5px var(--font-mono); color: var(--text-main); }
+.recon-description { display: block; margin-top: 5px; font-size: 11px; color: var(--text-dim); }
+.recon-provenance { display: block; margin-top: 5px; font: 9.5px var(--font-mono); color: var(--accent-primary); }
+.recon-gap p { margin-top: 7px; font-size: 11.5px; line-height: 1.45; color: var(--text-muted); }
+.recon-covered { color: var(--color-success); font-size: 12px; }
+.recon-covered span { font-weight: 800; margin-right: 6px; }
 
 /* ==========================================================================
    Dashboard Grid & Cards
@@ -1047,6 +1167,10 @@ input:focus, select:focus {
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
+  .recon-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .recon-detail-grid { grid-template-columns: 1fr; }
+  .recon-live-status { align-items: flex-start; flex-direction: column; }
+  .recon-process-stats { justify-content: flex-start; }
   .audit-bar {
     flex-direction: column;
     align-items: flex-start;

@@ -1,8 +1,8 @@
 {
   "plugin_id": "semgrep",
-  "plugin_version": "1",
+  "plugin_version": "1.173.0",
   "kind": "native_security_tool",
-  "adapter": "container_cli",
+  "adapter": "native",
   "enabled": true,
   "health": "declared_healthy",
   "capabilities": [{"capability": "source.static_analysis", "stage": "execute", "description": "Run deterministic static analysis against an authorized source repository.", "target_types": ["source_repository"], "required_operation": "static_analysis", "required_inputs": ["target_profile", "scope_policy"], "estimated_duration_seconds": 300, "estimated_cost_usd": 0, "reliability": 0.9}]

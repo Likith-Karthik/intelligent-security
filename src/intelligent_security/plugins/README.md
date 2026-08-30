@@ -6,7 +6,7 @@ Plugins extend the audit platform by advertising security capabilities. The plan
 
 - **Plugin package**: one removable directory under `plugins/packages/<plugin-id>/`. It contains a public `manifest.json`, and may contain a trusted `execution.json`, `normalizer.json`, plus templates or other package assets.
 - **Capability**: a stable action the platform can plan, such as `source.static_analysis`, `web.vulnerability_scan`, or `llm.prompt_injection_test`.
-- **Adapter**: trusted core support for invoking a plugin. Supported manifest values are `native`, `container_cli`, `rest`, `restricted_mcp`, and `llm_testing`.
+- **Adapter**: trusted core support for invoking a plugin. Supported manifest values are `native`, `container_cli`, `rest`, `restricted_mcp`, and `llm_testing`. This POC currently implements the first three.
 - **Registry snapshot**: the validated, immutable list of active plugin manifests. New discoveries and plans use the current snapshot after an operator refresh.
 
 Adding a plugin that uses an existing adapter is manifest/configuration work. Adding a completely new transport requires a new trusted adapter implementation; it does not require changes to planning, approval, or scheduling.
@@ -104,6 +104,8 @@ An MCP-backed plugin uses `"adapter": "restricted_mcp"`; its server connection d
 
 The runtime profile maps the package ID to the already-approved image or service runtime. This keeps deployment-specific values outside Git while allowing a package to be added or removed without modifying core planning, policy, scheduling, or execution code.
 
+For a native CLI package, the generic adapter resolves only the executable with the same name as `plugin_id` from the host `PATH`; the package cannot choose a path or supply a shell command. For a REST package, declare a fixed `GET` or `POST` path and a JSON body in the execution spec. The runtime's opaque `runtime_reference` is the approved HTTP(S) service base URL. Body values may contain only the one matching target placeholder; no planner-provided endpoint, command, or arbitrary URL is accepted.
+
 ## Manifest reference
 
 | Field | Required | Meaning |
@@ -161,6 +163,12 @@ To temporarily remove a plugin from new discoveries, set its `enabled` field to 
 To remove it completely, delete its package directory from the approved plugin source and refresh the registry. Remove the tool's external runtime/configuration through the normal operator deployment process; this application never performs uninstall actions.
 
 Existing audit plans and schedules retain capability requirements, not plugin IDs. During future execution, the resolver may select another healthy plugin that implements the same capability contract. If none is available, execution must return a capability gap for replanning rather than invoke a removed tool.
+
+## POC registration versus execution readiness
+
+The admin inventory may show a plugin package and its configured native or container runtime before it is executable. The planner receives a capability only when all of the following are present: an enabled healthy manifest, an `execution.json`, a matching enabled runtime profile, a supported adapter, and a runtime allowlist entry for the audited target.
+
+SDK-only tools and tools that require a deployment-specific YAML, source checkout, guardrail specification, model provider, or credential are intentionally registered without an execution specification until that configuration is supplied. A running idle container alone is not an executable security capability.
 
 ## Validate a change
 
