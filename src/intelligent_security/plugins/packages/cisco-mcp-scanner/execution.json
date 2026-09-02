@@ -1,0 +1,1 @@
+{"adapter":"container_cli","target_input":"url","arguments":["mcp-scanner","remote","--server-url","{{target.url}}","--analyzers","api,yara,behavioral,vulnerable_package","--raw"],"output_format":"text"}

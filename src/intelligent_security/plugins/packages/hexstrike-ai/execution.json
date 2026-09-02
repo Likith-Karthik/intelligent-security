@@ -1,0 +1,8 @@
+{
+  "adapter": "rest",
+  "target_input": "hostname",
+  "request_method": "POST",
+  "request_path": "/api/bugbounty/reconnaissance-workflow",
+  "request_body": {"domain": "{{target.hostname}}", "scope": ["{{target.hostname}}"], "out_of_scope": [], "program_type": "web"},
+  "output_format": "text"
+}

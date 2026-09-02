@@ -1,0 +1,6 @@
+{
+  "adapter": "native",
+  "target_input": "hostname",
+  "arguments": ["run", "-m", "subdomain", "-t", "{{target.hostname}}", "--timeout", "10m"],
+  "output_format": "text"
+}

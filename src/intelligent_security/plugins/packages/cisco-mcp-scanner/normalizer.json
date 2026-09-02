@@ -1,0 +1,1 @@
+{"input_artifact_kind":"stdout","input_format":"jsonl","fields":{"category":{"default":"mcp_security"},"title":{"path":"title","default":"MCP scanner observation"},"description":{"path":"description"},"affected_asset":{"path":"server_url"},"severity_reported":{"path":"severity"},"confidence":{"default":0.8}}}

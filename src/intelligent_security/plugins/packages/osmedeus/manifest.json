@@ -1,0 +1,9 @@
+{
+  "plugin_id": "osmedeus",
+  "plugin_version": "5.1.0",
+  "kind": "recon_orchestration_engine",
+  "adapter": "native",
+  "enabled": true,
+  "health": "declared_healthy",
+  "capabilities": [{"capability": "web.subdomain_discovery", "contract_version": "1", "stage": "recon", "description": "Run the bounded Osmedeus subdomain discovery module for an authorized hostname.", "target_types": ["web_application", "api"], "required_operation": "web_scan", "required_inputs": ["target_profile", "scope_policy"], "estimated_duration_seconds": 600, "estimated_cost_usd": 0, "reliability": 0.8}]
+}

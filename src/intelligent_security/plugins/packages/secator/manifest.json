@@ -1,0 +1,9 @@
+{
+  "plugin_id": "secator",
+  "plugin_version": "unavailable",
+  "kind": "security_orchestration_engine",
+  "adapter": "container_cli",
+  "enabled": false,
+  "health": "declared_unhealthy",
+  "capabilities": [{"capability": "web.workflow_scan", "contract_version": "1", "stage": "execute", "description": "Reserved catalog entry for Secator until an operator configures and starts its execution service.", "target_types": ["web_application", "api"], "required_operation": "web_scan", "required_inputs": ["target_profile", "scope_policy"], "estimated_duration_seconds": 600, "estimated_cost_usd": 0, "reliability": 0.0}]
+}
